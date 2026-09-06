@@ -1,0 +1,13 @@
+{
+  "name": "jiwpay-pos",
+  "source": "index.html",
+  "scripts": {
+    "build": "parcel build"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "lucide-react": "^0.263.1",
+    "parcel": "^2.9.3"
+  }
+}
