@@ -1,0 +1,18 @@
+{
+  "name": "JiwPay จิ๋วเปย์",
+  "short_name": "จิ๋วเปย์",
+  "lang": "th",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#fffaf0",
+  "theme_color": "#FF9142",
+  "icons": [
+    {
+      "src": "./jiwpay-logo-transparent.png",
+      "sizes": "1254x1254",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
