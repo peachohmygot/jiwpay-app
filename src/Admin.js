@@ -1,462 +1,1711 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
-  Users, Wallet, Banknote, Award, Megaphone, Clock, LayoutDashboard,
-  CheckCircle2, XCircle, Plus, Trash2, ShieldOff, ShieldCheck, UserPlus,
-  Search, AlertTriangle, RotateCcw, Pause, Play, SkipForward, TrendingUp,
-  Loader2, RefreshCw, X, QrCode, KeyRound,
+  XCircle,
+  TrendingUp,
+  Wallet,
+  History,
+  CheckCircle2,
+  X,
+  Award,
+  ArrowUpRight,
+  ArrowRight,
+  ArrowLeftRight,
+  Plus,
+  Minus,
+  Clock,
+  RefreshCw,
+  AlertTriangle,
+  LogOut,
+  Banknote,
+  CreditCard,
+  Loader2,
+  Megaphone,
+  QrCode,
+  ShieldCheck,
+  ShieldOff,
+  Users,
+  Inbox,
+  LayoutDashboard,
+  Check,
+  Play,
+  Pause,
+  SkipForward,
+  RotateCcw,
+  Search,
+  Trash2,
+  UserPlus,
 } from "lucide-react";
-
-const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Mitr:wght@500;600;700&family=Prompt:wght@400;500;600;700&display=swap');`;
-
-const API_BASE_URL = "https://script.google.com/macros/s/AKfycbyPM1-Dqf-Fx4o5UOYLtR2T9ArbveG2lPSvyV4I_wMSFz6UB0UU99k5EuTc5t4SsBZpLQ/exec";
-
-async function apiGet(params) {
-  const qs = new URLSearchParams(params).toString();
-  const res = await fetch(`${API_BASE_URL}?${qs}`);
-  return res.json();
+// Deliberately local to each entry point: neither app depends on the other.
+const API_BASE_URL =
+  process.env.REACT_APP_GAS_URL ||
+  "https://script.google.com/macros/s/AKfycbyPM1-Dqf-Fx4o5UOYLtR2T9ArbveG2lPSvyV4I_wMSFz6UB0UU99k5EuTc5t4SsBZpLQ/exec";
+function storageGet(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
 }
-async function apiPost(body) {
-  const res = await fetch(API_BASE_URL, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify(body),
-  });
-  return res.json();
+function storageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* Private mode/quota: keep the live session. */
+  }
 }
-
-/* ---------------- localStorage cache (stale-while-revalidate) ---------------- */
-
+function storageRemove(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* Storage is optional. */
+  }
+}
 function loadCache(key, fallback) {
-  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; } catch (e) { return fallback; }
+  try {
+    const value = JSON.parse(storageGet(key));
+    return value == null ? fallback : value;
+  } catch {
+    return fallback;
+  }
 }
-function saveCache(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {} }
-const CACHE_KEYS = {
-  users: "jiwpay_admin_cache_users", tx: "jiwpay_admin_cache_tx", topups: "jiwpay_admin_cache_topups",
-  loans: "jiwpay_admin_cache_loans", badges: "jiwpay_admin_cache_badges", gameState: "jiwpay_admin_cache_gamestate",
-};
-const ADMIN_SESSION_KEY = "jiwpay_admin_key";
-
-const fmtAccount = (acc) => (acc ? `${String(acc).slice(0, 3)}-${String(acc).slice(3)}` : "");
-const AVATAR_POOL = ["🐻", "🐼", "🐱", "🐰", "👦", "👧", "🐶", "🐸", "🦊", "🐨"];
-// FIX: previously the header just interpolated gameState.hour/minute directly,
-// so on a fresh cache-miss load (or right after Factory Reset) it silently
-// rendered "undefined:undefined น." — same root bug as the client app's
-// blank game time. Centralized here so every screen that shows the clock
-// goes through one safe formatter.
-const fmtGameTime = (gs) => (!gs || gs.day == null ? "🕐 กำลังซิงค์เวลา..." : `วันที่ ${gs.day} · ${String(gs.hour).padStart(2, "0")}:${String(gs.minute).padStart(2, "0")} น.`);
-
-function StatCard({ label, value, icon: Icon, tone }) {
-  const tones = { orange: "bg-orange-50 text-orange-700 border-orange-200", pink: "bg-pink-50 text-pink-700 border-pink-200", teal: "bg-teal-50 text-teal-700 border-teal-200", amber: "bg-amber-50 text-amber-700 border-amber-200" };
-  return (<div className={`rounded-2xl border-2 p-4 ${tones[tone]}`}><div className="flex items-center justify-between"><span className="text-xs font-medium opacity-80">{label}</span><Icon size={18} /></div><div className="mt-2 font-semibold text-2xl" style={{ fontFamily: "Mitr, sans-serif" }}>{value}</div></div>);
+function saveCache(key, value) {
+  storageSet(key, JSON.stringify(value));
 }
+const inFlightGets = new Map();
+async function request(params, body) {
+  if (
+    !/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(
+      API_BASE_URL,
+    )
+  ) {
+    return {
+      ok: false,
+      error: "ระบบยังไม่พร้อมให้บริการ กรุณาติดต่อผู้ดูแลระบบ",
+    };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const query = new URLSearchParams({ ...params, _ts: String(Date.now()) });
+    const response = await fetch(
+      body ? API_BASE_URL : `${API_BASE_URL}?${query}`,
+      {
+        method: body ? "POST" : "GET",
+        signal: controller.signal,
+        ...(body
+          ? {
+              headers: { "Content-Type": "text/plain;charset=utf-8" },
+              body: JSON.stringify(body),
+            }
+          : { cache: "no-store" }),
+      },
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (!data || typeof data !== "object") throw new Error("Invalid response");
+    if (
+      !body &&
+      params?.sheet &&
+      data.ok === true &&
+      !Array.isArray(data.rows)
+    ) {
+      return { ok: false, error: "ข้อมูลจากระบบไม่ครบถ้วน กรุณาลองรีเฟรช" };
+    }
+    // The supplied GAS returns { deleted } / { reset } for these operations.
+    const ok =
+      data.ok === true ||
+      (body?.type === "badge_delete" && typeof data.deleted === "boolean") ||
+      (body?.type === "factory_reset" && data.reset === true);
+    return {
+      ...data,
+      ok,
+      error: ok ? undefined : data.error || "เซิร์ฟเวอร์ส่งข้อมูลไม่ถูกต้อง",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      uncertain: !!body,
+      error: body
+        ? "ยังยืนยันผลรายการไม่ได้ กรุณารีเฟรชตรวจสอบก่อนทำรายการซ้ำ"
+        : error.name === "AbortError"
+          ? "เซิร์ฟเวอร์ตอบช้า กรุณาลองรีเฟรช"
+          : "เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ",
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+function apiGet(params, fresh = false) {
+  const key = JSON.stringify(params);
+  if (!fresh && inFlightGets.has(key)) return inFlightGets.get(key);
+  const task = request(params).finally(() => {
+    if (inFlightGets.get(key) === task) inFlightGets.delete(key);
+  });
+  inFlightGets.set(key, task);
+  return task;
+}
+const apiPost = (body) => request(null, body); // Never retry money writes automatically.
+const number = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+function normalizeUser(user) {
+  if (!user || !user.account) return null;
+  const { password, idCard, ...safe } = user;
+  for (const key of [
+    "balance",
+    "piggy",
+    "dailyRent",
+    "creditLimit",
+    "availableCredit",
+    "qrVersion",
+  ])
+    safe[key] = number(safe[key]);
+  for (const key of ["favoriteAccounts", "earnedBadges", "creditSchedules"])
+    safe[key] = Array.isArray(safe[key]) ? safe[key] : [];
+  for (const key of ["negative", "qrEnabled", "hasCreditCard"])
+    safe[key] =
+      safe[key] === true || String(safe[key]).toLowerCase() === "true";
+  return { ...safe, account: String(safe.account), loan: safe.loan || null };
+}
+function normalizeGame(row) {
+  if (
+    !row ||
+    ["day", "hour", "minute"].some(
+      (key) =>
+        row[key] === "" ||
+        row[key] == null ||
+        !Number.isFinite(Number(row[key])),
+    )
+  )
+    return null;
+  const day = number(row.day),
+    hour = number(row.hour),
+    minute = number(row.minute);
+  if (day < 1 || hour < 0 || hour > 23 || minute < 0 || minute > 59)
+    return null;
+  return {
+    ...row,
+    day,
+    hour,
+    minute,
+    gamePaused:
+      row.gamePaused === true ||
+      String(row.gamePaused).toLowerCase() === "true",
+  };
+}
+const sortTransactions = (rows) =>
+  [...rows].sort((a, b) =>
+    String(b.loggedAt || "").localeCompare(String(a.loggedAt || "")),
+  );
+const newId = () =>
+  globalThis.crypto?.randomUUID?.() ||
+  `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-function Modal({ title, onClose, children }) {
+// A ref closes the gap before React renders disabled=true. All async buttons
+// share this primitive, including icon-only actions and modal submissions.
+function ActionButton({
+  onClick,
+  disabled,
+  children,
+  type = "button",
+  ...props
+}) {
+  const locked = useRef(false);
+  const mounted = useRef(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const click = async (event) => {
+    if (locked.current || disabled) return;
+    locked.current = true;
+    const button = event.currentTarget;
+    try {
+      const result = onClick?.(event);
+      if (result && typeof result.then === "function") {
+        button.disabled = true;
+        setBusy(true);
+        await result;
+      }
+    } catch {
+      if (mounted.current) setError("ทำรายการไม่สำเร็จ กรุณาลองใหม่");
+    } finally {
+      locked.current = false;
+      if (mounted.current) {
+        button.disabled = !!disabled;
+        setBusy(false);
+      }
+    }
+  };
   return (
-    <div className="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-stone-900/40 p-0 sm:p-4">
-      <div className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl p-5 max-h-[85vh] overflow-y-auto">
-        <div className="flex items-center justify-between mb-4"><h3 className="font-semibold text-lg text-stone-800" style={{ fontFamily: "Mitr, sans-serif" }}>{title}</h3><button onClick={onClose} className="w-9 h-9 rounded-full bg-stone-100 flex items-center justify-center"><X size={18} className="text-stone-600" /></button></div>
+    <>
+      <button
+        {...props}
+        type={type}
+        disabled={disabled || busy}
+        aria-busy={busy}
+        onClick={click}
+      >
+        {busy && (
+          <Loader2
+            size={16}
+            className="inline-block animate-spin shrink-0 mr-1"
+            aria-label="กำลังดำเนินการ"
+          />
+        )}
         {children}
+      </button>
+      {error && (
+        <span role="alert" className="text-xs text-pink-600">
+          {error}
+        </span>
+      )}
+    </>
+  );
+}
+
+// One immutable snapshot, synchronous ref writes and generation guards keep
+// older GETs from replacing newer mutations. Only confirmed data is persisted.
+function useSnapshot(cacheKey, initial) {
+  const [data, render] = useState(() => initial());
+  const ref = useRef(data);
+  const generation = useRef(0);
+  const writing = useRef(false);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      generation.current++;
+    };
+  }, []);
+  const put = useCallback(
+    (next, persist = false) => {
+      ref.current = typeof next === "function" ? next(ref.current) : next;
+      if (alive.current) render(ref.current);
+      if (persist) saveCache(cacheKey, ref.current);
+    },
+    [cacheKey],
+  );
+  return { data, ref, put, generation, writing, alive };
+}
+const DESIGN = `
+@import url('https://fonts.googleapis.com/css2?family=Mitr:wght@400;500;600&family=Prompt:wght@400;500;600;700&display=swap');
+.jp { --ink:#594034; --muted:#9b8274; --line:#ffe0bd; --paper:#fffaf0; --green:#f58b38; font-family:'Prompt',sans-serif; color:var(--ink); background:var(--paper); min-height:100dvh; -webkit-tap-highlight-color:transparent; }
+.jp * { box-sizing:border-box; }
+
+.jp button { touch-action:manipulation; transition:background .18s,transform .18s,opacity .18s; }
+.jp button:active:not(:disabled) { transform:scale(.97); }
+.jp button:disabled { cursor:not-allowed; opacity:.5; }
+.jp button:focus-visible,.jp input:focus-visible,.jp textarea:focus-visible,.jp select:focus-visible { outline:3px solid #ffba82; outline-offset:3px; }
+
+.jp-heading { font-family:'Mitr',sans-serif; letter-spacing:-.035em; }
+.jp-card { background:white; border:2px solid var(--line); border-radius:28px; }
+.jp-label { font-size:11px; font-weight:500; letter-spacing:0; color:var(--muted); }
+.jp-input { display:block; width:100%; border:1px solid #ffddba; border-radius:14px; background:#fffdf7; padding:13px 15px; font-size:14px; color:var(--ink); outline:none; transition:border-color .2s; }
+.jp-input:focus { border-color:#ff9142; background:white; }
+.jp-input::placeholder { color:#a1aaa1; }
+.jp-primary { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; border:0; border-radius:16px; padding:15px 18px; color:white; background:linear-gradient(135deg,#ffad60,#ff9142); box-shadow:0 5px 0 #e77927; font-size:14px; font-weight:600; }
+.jp-secondary { display:flex; align-items:center; justify-content:center; gap:8px; border:2px solid var(--line); border-radius:14px; padding:11px 16px; background:white; font-size:13px; font-weight:500; }
+.jp-icon { width:40px; height:40px; border-radius:14px; display:inline-flex; align-items:center; justify-content:center; background:white; border:2px solid var(--line); flex-shrink:0; }
+.jp-number { font-variant-numeric:tabular-nums; letter-spacing:-.045em; }
+.jp-enter { animation:jp-enter .25s ease-out; }
+.jp-shimmer { background:linear-gradient(100deg,#e8ece5 20%,#f5f7f1 45%,#e8ece5 70%); background-size:250% 100%; animation:jp-shimmer 1.6s infinite; border-radius:12px; }
+@keyframes jp-enter { from { opacity:0; transform:translateY(7px); } to { opacity:1; transform:translateY(0); } }
+@keyframes jp-shimmer { to { background-position:-150% 0; } }
+@media(prefers-reduced-motion:reduce) { .jp *, .jp *::before { animation:none!important; transition:none!important; } }
+`;
+const money = (value) =>
+  number(value).toLocaleString("th-TH", { maximumFractionDigits: 2 });
+const fmtAccount = (account) =>
+  String(account || "").replace(/^(\d{3})(\d+)$/, "$1 $2");
+const fmtGameTime = (value) => {
+  const time = normalizeGame(value);
+  return time
+    ? `วันที่ ${time.day} · ${String(time.hour).padStart(2, "0")}:${String(time.minute).padStart(2, "0")} น.${time.gamePaused ? " · หยุดชั่วคราว" : ""}`
+    : "กำลังซิงค์เวลา...";
+};
+function Brand({ admin = false }) {
+  return (
+    <div className="flex items-center gap-2">
+      <img
+        src="./jiwpay-logo-transparent.png"
+        onError={(event) => {
+          if (!event.currentTarget.dataset.fallback) {
+            event.currentTarget.dataset.fallback = "true";
+            event.currentTarget.src =
+              "https://i.postimg.cc/T2Z6xTkR/Untitled48-20260902112016.png";
+          }
+        }}
+        alt="โลโก้ JiwPay จิ๋วเปย์"
+        className="w-14 h-14 object-contain shrink-0"
+      />
+      <div>
+        <span className="jp-heading text-xl text-orange-500 block">JiwPay</span>
+        <span className="text-xs text-stone-400">
+          {admin ? "จิ๋วเปย์ · ผู้ดูแล" : "จิ๋วเปย์ กระเป๋าความสุข"}
+        </span>
       </div>
     </div>
   );
 }
+function IconButton({ label, children, ...props }) {
+  return (
+    <ActionButton
+      className="jp-icon"
+      aria-label={label}
+      title={label}
+      {...props}
+    >
+      {children}
+    </ActionButton>
+  );
+}
+function Field({ label, children, ...props }) {
+  const id = React.useId();
+  return (
+    <label htmlFor={id} className="block">
+      <span className="jp-label block mb-2">{label}</span>
+      {children || <input id={id} className="jp-input" {...props} />}
+    </label>
+  );
+}
+function Empty({ icon: Icon = History, title, detail }) {
+  return (
+    <div className="py-10 px-6 text-center">
+      <div className="w-12 h-12 rounded-2xl bg-[#f0f3ec] text-[#9b8274] mx-auto mb-3 flex items-center justify-center">
+        <Icon size={21} />
+      </div>
+      <p className="text-sm font-medium">{title}</p>
+      {detail && (
+        <p className="text-xs text-[#9b8274] mt-2 leading-relaxed">{detail}</p>
+      )}
+    </div>
+  );
+}
+function Notice({ children }) {
+  return children ? (
+    <div
+      role="alert"
+      className="flex items-start gap-2 rounded-2xl bg-[#fff1e8] text-[#925a36] p-3 text-xs leading-relaxed"
+    >
+      <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+      {children}
+    </div>
+  ) : null;
+}
+function Toast({ toast }) {
+  return toast ? (
+    <div
+      role={toast.kind === "error" ? "alert" : "status"}
+      className="fixed top-4 left-1/2 -translate-x-1/2 z-[120] w-[calc(100%-32px)] max-w-sm jp-enter"
+    >
+      <div className="bg-[#594034] text-white rounded-2xl shadow-xl p-4 flex items-center gap-3">
+        <span
+          className={
+            toast.kind === "error" ? "text-orange-300" : "text-[#d7e9ac]"
+          }
+        >
+          {toast.kind === "error" ? (
+            <AlertTriangle size={21} />
+          ) : (
+            <CheckCircle2 size={21} />
+          )}
+        </span>
+        <div>
+          <p className="text-sm font-medium">{toast.title}</p>
+          {toast.detail && (
+            <p className="text-xs opacity-70 mt-1">{toast.detail}</p>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null;
+}
+function Sheet({ title, onClose, children, busy = false }) {
+  const panel = useRef(null);
+  const closeRef = useRef(onClose),
+    busyRef = useRef(busy);
+  closeRef.current = onClose;
+  busyRef.current = busy;
+  useEffect(() => {
+    const previous = document.activeElement,
+      overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    panel.current?.focus();
+    const key = (event) => {
+      if (event.key === "Escape" && !busyRef.current) closeRef.current();
+      if (event.key !== "Tab") return;
+      const items = [
+        ...panel.current.querySelectorAll(
+          'button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),[tabindex="0"]',
+        ),
+      ];
+      const first = items[0],
+        last = items[items.length - 1];
+      if (!first) {
+        event.preventDefault();
+        return;
+      }
+      if (
+        event.shiftKey &&
+        (document.activeElement === first ||
+          document.activeElement === panel.current)
+      ) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", key);
+    return () => {
+      document.body.style.overflow = overflow;
+      document.removeEventListener("keydown", key);
+      previous?.focus?.();
+    };
+  }, []);
+  return (
+    <div
+      className="fixed inset-0 z-[80] bg-[#594034]/40 backdrop-blur-sm flex items-end sm:items-center justify-center sm:p-5"
+      onClick={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose();
+      }}
+    >
+      <section
+        ref={panel}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="jp-enter bg-[#fffaf0] rounded-t-[28px] sm:rounded-[28px] w-full max-w-md p-6 max-h-[90dvh] overflow-y-auto outline-none"
+        style={{ paddingBottom: "max(24px,env(safe-area-inset-bottom))" }}
+      >
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="jp-heading text-xl">{title}</h2>
+          <IconButton disabled={busy} label="ปิด" onClick={onClose}>
+            <X size={17} />
+          </IconButton>
+        </div>
+        {children}
+      </section>
+    </div>
+  );
+}
+function SectionTitle({ eyebrow, title, action }) {
+  return (
+    <div className="flex items-end justify-between gap-3 mb-5">
+      <div>
+        {eyebrow && <p className="jp-label uppercase mb-1.5">{eyebrow}</p>}
+        <h2 className="jp-heading text-2xl">{title}</h2>
+      </div>
+      {action}
+    </div>
+  );
+}
+function PendingBanner({ active }) {
+  return active ? (
+    <div
+      role="status"
+      className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[110] rounded-full bg-[#594034] text-white px-4 py-2.5 text-xs shadow-lg flex items-center gap-2"
+    >
+      <Loader2 size={14} className="animate-spin" />
+      กำลังบันทึกรายการ...
+    </div>
+  ) : null;
+}
 
-/* ================= ROOT ================= */
-
+const ADMIN_SESSION_KEY = "jiwpay_admin_key";
+const AVATAR_POOL = [
+  "🐻",
+  "🐼",
+  "🐱",
+  "🐰",
+  "👦",
+  "👧",
+  "🐶",
+  "🐸",
+  "🦊",
+  "🐨",
+];
 export default function AdminDashboardApp() {
-  const [adminKey, setAdminKey] = useState(() => localStorage.getItem(ADMIN_SESSION_KEY) || "");
-  const [authed, setAuthed] = useState(false);
-  const [checkingSession, setCheckingSession] = useState(!!localStorage.getItem(ADMIN_SESSION_KEY));
+  const [adminKey, setAdminKey] = useState(
+    () => storageGet(ADMIN_SESSION_KEY) || "",
+  );
+  useEffect(() => {
+    const sync = (event) => {
+      if (event.key === ADMIN_SESSION_KEY) setAdminKey(event.newValue || "");
+    };
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  }, []);
   const [keyInput, setKeyInput] = useState("");
   const [authError, setAuthError] = useState("");
   const [verifying, setVerifying] = useState(false);
-
-  // Persistent session: if we already have a saved key, silently re-verify
-  // it in the background instead of showing the login gate again.
-  useEffect(() => {
-    const saved = localStorage.getItem(ADMIN_SESSION_KEY);
-    if (!saved) { setCheckingSession(false); return; }
-    (async () => {
-      const res = await apiGet({ sheet: "GameState", adminKey: saved });
-      if (res.ok && res.scope === "admin") setAuthed(true);
-      else localStorage.removeItem(ADMIN_SESSION_KEY);
-      setCheckingSession(false);
-    })();
-  }, []);
-
+  const authLock = useRef(false);
   const verifyKey = async () => {
-    if (verifying) return;
-    setVerifying(true); setAuthError("");
-    const res = await apiGet({ sheet: "GameState", adminKey: keyInput });
-    setVerifying(false);
-    if (res.ok && res.scope === "admin") {
-      setAdminKey(keyInput);
-      localStorage.setItem(ADMIN_SESSION_KEY, keyInput);
-      setAuthed(true);
-    } else setAuthError("รหัสแอดมินไม่ถูกต้อง หรือเชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ");
+    if (authLock.current || !keyInput.trim()) return;
+    authLock.current = true;
+    setVerifying(true);
+    setAuthError("");
+    try {
+      const result = await apiGet(
+        { sheet: "GameState", adminKey: keyInput.trim() },
+        true,
+      );
+      if (result.ok && result.scope === "admin") {
+        storageSet(ADMIN_SESSION_KEY, keyInput.trim());
+        setAdminKey(keyInput.trim());
+      } else setAuthError(result.error || "รหัสแอดมินไม่ถูกต้อง");
+    } finally {
+      authLock.current = false;
+      setVerifying(false);
+    }
   };
-
-  if (checkingSession) {
+  const onLogout = () => {
+    storageRemove(ADMIN_SESSION_KEY);
+    storageRemove("jiwpay_admin_v4");
+    setAdminKey("");
+  };
+  if (adminKey)
     return (
-      <div className="min-h-screen flex items-center justify-center gap-3 bg-amber-50" style={{ fontFamily: "Prompt, sans-serif" }}>
-        <style>{FONT_IMPORT}</style>
-        <Loader2 size={28} className="text-orange-500 animate-spin" /> <span className="text-stone-400 text-sm">กำลังตรวจสอบเซสชัน...</span>
-      </div>
+      <AdminDashboard key={adminKey} adminKey={adminKey} onLogout={onLogout} />
     );
-  }
-
-  if (!authed) {
-    return (
-      <div className="min-h-screen bg-amber-50 flex items-center justify-center px-6" style={{ fontFamily: "Prompt, sans-serif" }}>
-        <style>{FONT_IMPORT}</style>
-        <div className="w-full max-w-sm bg-white rounded-3xl border-2 border-orange-100 p-6">
-          <div className="flex justify-center mb-4"><KeyRound size={36} className="text-orange-500" /></div>
-          <div className="font-semibold text-lg text-stone-800 text-center mb-1" style={{ fontFamily: "Mitr, sans-serif" }}>JiwPay แอดมิน</div>
-          <div className="text-xs text-stone-400 text-center mb-5">ใส่รหัสผู้ดูแลระบบเพื่อเข้าใช้งาน</div>
-          <input value={keyInput} onChange={(e) => setKeyInput(e.target.value)} type="password" placeholder="Admin Key" onKeyDown={(e) => e.key === "Enter" && verifyKey()} className="w-full px-4 py-3 rounded-xl border-2 border-orange-100 outline-none focus:border-orange-300 text-sm mb-3" />
-          {authError && <div className="text-xs text-pink-500 font-medium mb-3">{authError}</div>}
-          <button onClick={verifyKey} disabled={verifying || !keyInput} className="w-full py-3.5 rounded-xl font-semibold text-white bg-orange-500 disabled:opacity-50 flex items-center justify-center gap-2" style={{ fontFamily: "Mitr, sans-serif" }}>{verifying && <Loader2 size={16} className="animate-spin" />} เข้าสู่ระบบ</button>
+  return (
+    <div className="jp">
+      <style>{DESIGN}</style>
+      <main className="max-w-md mx-auto px-6 py-10 min-h-[100dvh] flex flex-col">
+        <Brand admin />
+        <div className="my-auto py-14">
+          <div className="w-16 h-16 bg-[#fff0d4] rounded-3xl flex items-center justify-center mb-7">
+            <ShieldCheck size={29} className="text-[#627d4d]" />
+          </div>
+          <SectionTitle
+            eyebrow="สำหรับผู้ดูแลระบบ"
+            title="เข้าสู่ระบบผู้ดูแล"
+          />
+          <p className="text-sm text-[#9b8274] leading-relaxed mb-8">
+            จัดการบัญชีผู้ใช้ ตรวจสอบคำขอ
+            <br />
+            และดูความเคลื่อนไหวในระบบ
+          </p>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              verifyKey();
+            }}
+            className="space-y-5"
+          >
+            <Field
+              label="รหัสผู้ดูแลระบบ"
+              type="password"
+              autoComplete="current-password"
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              placeholder="รหัสผู้ดูแลระบบ"
+            />
+            <Notice>{authError}</Notice>
+            <ActionButton
+              className="jp-primary"
+              type="submit"
+              disabled={verifying || !keyInput.trim()}
+            >
+              {verifying ? (
+                <Loader2 size={17} className="animate-spin" />
+              ) : (
+                <ArrowRight size={17} />
+              )}
+              เข้าสู่แดชบอร์ด
+            </ActionButton>
+          </form>
         </div>
-      </div>
-    );
-  }
-  return <AdminDashboard adminKey={adminKey} onLogout={() => { localStorage.removeItem(ADMIN_SESSION_KEY); setAuthed(false); setAdminKey(""); }} />;
+        <p className="text-[11px] text-[#9ca69b] text-center tracking-widest">
+          JIWPAY ผู้ดูแลระบบ
+        </p>
+      </main>
+    </div>
+  );
 }
-
-/* ================= DASHBOARD ================= */
-
 function AdminDashboard({ adminKey, onLogout }) {
+  const { data, ref, put, generation, writing, alive } = useSnapshot(
+    "jiwpay_admin_v4",
+    () => {
+      const cached = loadCache("jiwpay_admin_v4", {});
+      return {
+        users: Array.isArray(cached.users)
+          ? cached.users.map(normalizeUser).filter(Boolean)
+          : [],
+        transactions: Array.isArray(cached.transactions)
+          ? cached.transactions
+          : [],
+        topups: Array.isArray(cached.topups) ? cached.topups : [],
+        loanRequests: Array.isArray(cached.loanRequests)
+          ? cached.loanRequests
+          : [],
+        badges: Array.isArray(cached.badges) ? cached.badges : [],
+        gameState: normalizeGame(cached.gameState),
+      };
+    },
+  );
+  const { users, transactions, topups, loanRequests, badges, gameState } = data;
   const [tab, setTab] = useState("overview");
-  // cache-first: render instantly with whatever we saw last time
-  const [users, setUsers] = useState(() => loadCache(CACHE_KEYS.users, []));
-  const [transactions, setTransactions] = useState(() => loadCache(CACHE_KEYS.tx, []));
-  const [topups, setTopups] = useState(() => loadCache(CACHE_KEYS.topups, []));
-  const [loanRequests, setLoanRequests] = useState(() => loadCache(CACHE_KEYS.loans, []));
-  const [badges, setBadges] = useState(() => loadCache(CACHE_KEYS.badges, []));
-  const [gameState, setGameState] = useState(() => loadCache(CACHE_KEYS.gameState, null));
-  const [announcementDraft, setAnnouncementDraft] = useState("");
-  const [initialLoading, setInitialLoading] = useState(users.length === 0);
+  const [announcementDraft, setAnnouncementDraft] = useState(
+    gameState?.announcement || "",
+  );
+  const draftDirty = useRef(false);
   const [globalRefreshing, setGlobalRefreshing] = useState(false);
   const [search, setSearch] = useState("");
   const [toast, setToast] = useState(null);
-
+  const [syncError, setSyncError] = useState("");
+  const [authorized, setAuthorized] = useState(false);
   const [editUser, setEditUser] = useState(null);
   const [showAddBadge, setShowAddBadge] = useState(false);
   const [showCreateAccount, setShowCreateAccount] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetPhrase, setResetPhrase] = useState("");
-  const [busyAction, setBusyAction] = useState(null); // tracks id/key of whichever button is mid-flight
-  const [processingRow, setProcessingRow] = useState(null); // id of a topup/loan row being approved/rejected
-
-  const notify = (title, detail) => { setToast({ title, detail }); setTimeout(() => setToast(null), 3500); };
-
-  // cache sync
-  useEffect(() => saveCache(CACHE_KEYS.users, users), [users]);
-  useEffect(() => saveCache(CACHE_KEYS.tx, transactions), [transactions]);
-  useEffect(() => saveCache(CACHE_KEYS.topups, topups), [topups]);
-  useEffect(() => saveCache(CACHE_KEYS.loans, loanRequests), [loanRequests]);
-  useEffect(() => saveCache(CACHE_KEYS.badges, badges), [badges]);
-  useEffect(() => { if (gameState) saveCache(CACHE_KEYS.gameState, gameState); }, [gameState]);
-
-  const refreshAll = useCallback(async () => {
-    const [u, t, tp, ln, b, gs] = await Promise.all([
-      apiGet({ sheet: "Users", adminKey }), apiGet({ sheet: "Transactions", adminKey }),
-      apiGet({ sheet: "Topups", adminKey }), apiGet({ sheet: "LoanRequests", adminKey }),
-      apiGet({ sheet: "Badges", adminKey }), apiGet({ sheet: "GameState", adminKey }),
-    ]);
-    if (u.ok) setUsers(u.rows);
-    if (t.ok) setTransactions(t.rows.sort((a, b2) => (b2.loggedAt || "").localeCompare(a.loggedAt || "")));
-    if (tp.ok) setTopups(tp.rows);
-    if (ln.ok) setLoanRequests(ln.rows);
-    if (b.ok) setBadges(b.rows);
-    if (gs.ok && gs.rows[0]) { setGameState(gs.rows[0]); setAnnouncementDraft(gs.rows[0].announcement || ""); }
-    setInitialLoading(false);
-  }, [adminKey]);
-
-  // stale-while-revalidate: fetch fresh data in the background on mount,
-  // regardless of whether cached data was already showing
-  useEffect(() => { refreshAll(); }, [refreshAll]);
-
-  const doGlobalRefresh = async () => { setGlobalRefreshing(true); await refreshAll(); setGlobalRefreshing(false); notify("✅ รีเฟรชข้อมูลแล้ว", ""); };
-
-  const pending = topups.filter((t) => t.status === "pending");
-  const pendingLoans = loanRequests.filter((r) => r.status === "pending");
-  const totalBalance = users.reduce((s, u) => s + Number(u.balance || 0), 0);
-  const filteredUsers = users.filter((u) => (u.name || "").includes(search) || String(u.account || "").includes(search));
-
-  // ---- optimistic approve/reject: update the row instantly, roll back on failure ----
-  const topupDecision = async (id, status) => {
-    setProcessingRow(id);
-    const prev = topups;
-    const req = topups.find((t) => t.id === id);
-    setTopups((list) => list.map((t) => (t.id === id ? { ...t, status } : t))); // optimistic
-    if (status === "approved" && req) setUsers((list) => list.map((u) => (String(u.id) === String(req.userId) ? { ...u, balance: Number(u.balance || 0) + Number(req.amount) } : u)));
-    const res = await apiPost({ type: "topup_decision", adminKey, id, status });
-    setProcessingRow(null);
-    if (!res.ok) { setTopups(prev); notify("❌ ทำรายการไม่สำเร็จ", res.error); return; }
-    notify(status === "approved" ? "✅ อนุมัติคำขอเติมเงินแล้ว" : "ปฏิเสธคำขอแล้ว", "");
+  const [busyAction, setBusyAction] = useState(null);
+  const noticeTimer = useRef();
+  const refreshLock = useRef(null);
+  const notify = (title, detail) => {
+    setToast({
+      title,
+      detail,
+      kind:
+        title.includes("ไม่สำเร็จ") || title.includes("ยืนยันรายการไม่ได้")
+          ? "error"
+          : "success",
+    });
+    clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setToast(null), 4200);
+  };
+  useEffect(() => () => clearTimeout(noticeTimer.current), []);
+  const refreshAll = useCallback(
+    (fresh = false) => {
+      if (writing.current) return Promise.resolve(false);
+      if (refreshLock.current && !fresh) return refreshLock.current;
+      const version = ++generation.current;
+      const task = (async () => {
+        const sheets = [
+          "Users",
+          "Transactions",
+          "Topups",
+          "LoanRequests",
+          "Badges",
+          "GameState",
+        ];
+        const results = await Promise.all(
+          sheets.map((sheet) => apiGet({ sheet, adminKey }, fresh)),
+        );
+        if (!alive.current || version !== generation.current || writing.current)
+          return false;
+        const [u, t, tp, ln, b, gs] = results;
+        if (gs.ok && gs.scope !== "admin") {
+          setAuthorized(false);
+          setSyncError("รหัสแอดมินใช้ไม่ได้ กรุณาออกจากระบบแล้วใส่รหัสใหม่");
+          return false;
+        }
+        if (gs.ok) setAuthorized(true);
+        const valid = (result) =>
+          result.ok && result.scope === "admin" && Array.isArray(result.rows);
+        put(
+          (old) => ({
+            users: valid(u)
+              ? u.rows.map(normalizeUser).filter(Boolean)
+              : old.users,
+            transactions: valid(t)
+              ? sortTransactions(t.rows)
+              : old.transactions,
+            topups: valid(tp) ? tp.rows : old.topups,
+            loanRequests: valid(ln) ? ln.rows : old.loanRequests,
+            badges: valid(b) ? b.rows : old.badges,
+            gameState: valid(gs) ? normalizeGame(gs.rows[0]) : old.gameState,
+          }),
+          true,
+        );
+        if (valid(gs) && !draftDirty.current)
+          setAnnouncementDraft(gs.rows[0]?.announcement || "");
+        const failure = results.find((result) => !valid(result));
+        setSyncError(failure?.error || "");
+        return !failure;
+      })().finally(() => {
+        if (refreshLock.current === task) refreshLock.current = null;
+      });
+      refreshLock.current = task;
+      return task;
+    },
+    [adminKey, alive, generation, put, ref, writing],
+  );
+  useEffect(() => {
     refreshAll();
+    const sync = () => {
+      if (!document.hidden) refreshAll();
+    };
+    const timer = setInterval(sync, 60000);
+    window.addEventListener("focus", sync);
+    window.addEventListener("online", sync);
+    return () => {
+      refreshLock.current = null;
+      clearInterval(timer);
+      window.removeEventListener("focus", sync);
+      window.removeEventListener("online", sync);
+    };
+  }, [refreshAll]);
+  const doGlobalRefresh = async () => {
+    if (writing.current || globalRefreshing) return;
+    setGlobalRefreshing(true);
+    try {
+      if (await refreshAll(true)) notify("รีเฟรชข้อมูลแล้ว", "");
+    } finally {
+      if (alive.current) setGlobalRefreshing(false);
+    }
   };
-  const loanDecision = async (id, status) => {
-    setProcessingRow(id);
-    const prev = loanRequests;
-    setLoanRequests((list) => list.map((r) => (r.id === id ? { ...r, status } : r))); // optimistic
-    const res = await apiPost({ type: "loan_decision", adminKey, id, status });
-    setProcessingRow(null);
-    if (!res.ok) { setLoanRequests(prev); notify("❌ ทำรายการไม่สำเร็จ", res.error); return; }
-    notify(status === "approved" ? "✅ อนุมัติคำขอกู้เงินแล้ว" : "ปฏิเสธคำขอแล้ว", "");
-    refreshAll();
+  const mutate = async (key, body, optimistic, title = "บันทึกสำเร็จ") => {
+    if (writing.current || !authorized)
+      return { ok: false, error: "กรุณารอการตรวจสอบหรือรายการก่อนหน้า" };
+    writing.current = true;
+    generation.current++;
+    setBusyAction(key);
+    const before = ref.current;
+    try {
+      if (optimistic) put(optimistic(before));
+      const result = await apiPost({ ...body, adminKey });
+      if (!alive.current) return result;
+      if (!result.ok) {
+        put(before);
+        notify(
+          result.uncertain ? "ยังยืนยันรายการไม่ได้" : "ทำรายการไม่สำเร็จ",
+          result.error,
+        );
+        if (result.uncertain) setSyncError(result.error);
+        return result;
+      }
+      put(ref.current, true);
+      notify(title, "");
+      return result;
+    } catch {
+      if (alive.current) {
+        put(before);
+        notify("ทำรายการไม่สำเร็จ", "กรุณารีเฟรชตรวจสอบ");
+      }
+      return { ok: false, error: "ทำรายการไม่สำเร็จ" };
+    } finally {
+      writing.current = false;
+      if (alive.current) {
+        setBusyAction(null);
+        refreshAll(true);
+      }
+    }
   };
-
-  const adjustBalance = async (userId, delta) => {
-    setBusyAction(`balance-${userId}`);
-    const u = users.find((x) => x.id === userId);
-    const newBalance = Math.max(0, Number(u.balance || 0) + delta);
-    setUsers((list) => list.map((x) => (x.id === userId ? { ...x, balance: newBalance } : x))); // optimistic
-    await apiPost({ type: "user_admin_upsert", adminKey, user: { id: userId, balance: newBalance } });
-    setBusyAction(null);
-    notify("✅ ปรับยอดเงินสำเร็จ", "");
+  const decision = (id, status, loan) => {
+    const collection = loan ? "loanRequests" : "topups";
+    const row = ref.current[collection].find(
+      (item) => String(item.id) === String(id),
+    );
+    if (!row || row.status !== "pending" || writing.current)
+      return Promise.resolve({ ok: false });
+    return mutate(
+      `decision-${id}`,
+      { type: loan ? "loan_decision" : "topup_decision", id, status },
+      (state) => ({
+        ...state,
+        [collection]: state[collection].map((item) =>
+          String(item.id) === String(id) ? { ...item, status } : item,
+        ),
+        users: state.users.map((user) => {
+          if (status !== "approved" || String(user.id) !== String(row.userId))
+            return user;
+          return {
+            ...user,
+            balance: user.balance + number(row.amount),
+            ...(loan
+              ? {
+                  loan: {
+                    principal: number(row.amount),
+                    days: number(row.days),
+                    rate: number(row.rate),
+                    dailyInstallment: Math.ceil(
+                      Math.ceil(number(row.amount) * (1 + number(row.rate))) /
+                        number(row.days),
+                    ),
+                    daysPaid: 0,
+                    status: "active",
+                    startDay: state.gameState?.day || 1,
+                    missedSinceDay: null,
+                  },
+                }
+              : {}),
+          };
+        }),
+      }),
+      status === "approved" ? "อนุมัติคำขอแล้ว" : "ปฏิเสธคำขอแล้ว",
+    );
   };
-  const toggleQr = async (u) => { setBusyAction(`qr-${u.id}`); setUsers((list) => list.map((x) => (x.id === u.id ? { ...x, qrEnabled: !x.qrEnabled } : x))); await apiPost({ type: "user_admin_upsert", adminKey, user: { id: u.id, qrEnabled: !u.qrEnabled } }); setBusyAction(null); };
-  const reissueQr = async (u) => { setBusyAction(`reissue-${u.id}`); await apiPost({ type: "user_admin_upsert", adminKey, user: { id: u.id, qrVersion: (u.qrVersion || 1) + 1, qrEnabled: true } }); setBusyAction(null); refreshAll(); notify("✅ ออกบัตร QR ใหม่แล้ว", ""); };
-  const issueCreditCard = async (u) => { setBusyAction(`credit-${u.id}`); const limit = Math.floor((u.piggy || 0) * 0.5); await apiPost({ type: "user_admin_upsert", adminKey, user: { id: u.id, hasCreditCard: true, creditLimit: limit, availableCredit: limit } }); setBusyAction(null); refreshAll(); notify("✅ ออกบัตรเครดิตสำเร็จ", `วงเงิน ${limit.toLocaleString()} ฿`); };
-  const setDailyRent = async (u, rent) => { await apiPost({ type: "user_admin_upsert", adminKey, user: { id: u.id, dailyRent: rent } }); notify("✅ ตั้งค่าเช่ารายวันแล้ว", ""); };
-
-  const createAccount = async (form) => {
-    setBusyAction("create-account");
-    const id = Date.now();
-    const res = await apiPost({ type: "user_admin_upsert", adminKey, user: {
-      id, account: form.account, name: form.shopName, fullName: form.fullName, idCard: form.idCard, password: form.password,
-      avatar: AVATAR_POOL[id % AVATAR_POOL.length], balance: 0, piggy: 0, dailyRent: 0, negative: false,
-      qrEnabled: true, qrVersion: 1, hasCreditCard: false, creditLimit: 0, availableCredit: 0,
-      loan: null, creditSchedules: [], favoriteAccounts: [], earnedBadges: [],
-    }});
-    setBusyAction(null);
-    if (res.ok) { notify("✅ สร้างบัญชีสำเร็จ", form.shopName); refreshAll(); }
-    return res;
+  const updateUser = (key, id, patch) =>
+    mutate(
+      key,
+      { type: "user_admin_upsert", user: { id, ...patch } },
+      (state) => ({
+        ...state,
+        users: state.users.map((user) =>
+          String(user.id) === String(id) ? { ...user, ...patch } : user,
+        ),
+      }),
+    );
+  const adjustBalance = (id, delta) => {
+    const user = ref.current.users.find(
+      (item) => String(item.id) === String(id),
+    );
+    return updateUser(`balance-${id}`, id, {
+      balance: Math.max(0, user.balance + number(delta)),
+      negative: false,
+    });
   };
-  const addBadge = async (b) => { setBusyAction("add-badge"); await apiPost({ type: "badge_upsert", adminKey, badge: { id: Date.now(), ...b } }); setBusyAction(null); notify("✅ เพิ่มเหรียญสำเร็จ", ""); refreshAll(); };
-  const deleteBadge = async (id) => { setBadges((list) => list.filter((b) => b.id !== id)); await apiPost({ type: "badge_delete", adminKey, id }); };
-  const togglePause = async () => { setBusyAction("pause"); const next = { ...gameState, gamePaused: !gameState.gamePaused }; setGameState(next); await apiPost({ type: "game_state", adminKey, state: next }); setBusyAction(null); };
-  const skipNight = async () => {
-    setBusyAction("skip-night");
-    let { day, hour, minute } = gameState;
-    let total = hour * 60 + minute + 720;
-    const dayAdd = Math.floor(total / 1440); total %= 1440;
-    const next = { ...gameState, day: day + dayAdd, hour: Math.floor(total / 60), minute: total % 60 };
-    setGameState(next);
-    await apiPost({ type: "game_state", adminKey, state: next });
-    setBusyAction(null);
-    notify("✅ ข้ามคืนสำเร็จ", "");
+  const toggleQr = (user) =>
+    updateUser(`qr-${user.id}`, user.id, { qrEnabled: !user.qrEnabled });
+  const reissueQr = (user) =>
+    updateUser(`reissue-${user.id}`, user.id, {
+      qrVersion: Math.max(1, number(user.qrVersion)) + 1,
+      qrEnabled: true,
+    });
+  const issueCreditCard = (user) => {
+    const limit = Math.floor(user.piggy * 0.5),
+      used = Math.max(0, user.creditLimit - user.availableCredit);
+    return updateUser(`credit-${user.id}`, user.id, {
+      hasCreditCard: true,
+      creditLimit: limit,
+      availableCredit: Math.max(0, limit - used),
+    });
   };
-  const publishAnnouncement = async () => { setBusyAction("announcement"); const next = { ...gameState, announcement: announcementDraft }; setGameState(next); await apiPost({ type: "game_state", adminKey, state: next }); setBusyAction(null); notify("✅ เผยแพร่ประกาศแล้ว", ""); };
-  const factoryReset = async () => { setBusyAction("reset"); await apiPost({ type: "factory_reset", adminKey }); setBusyAction(null); setShowResetConfirm(false); setResetPhrase(""); refreshAll(); notify("✅ รีเซ็ตระบบสำเร็จ", ""); };
-
+  const setDailyRent = (user, rent) => {
+    if (number(rent) === user.dailyRent) return Promise.resolve({ ok: true });
+    return updateUser(`rent-${user.id}`, user.id, {
+      dailyRent: Math.max(0, number(rent)),
+    });
+  };
+  const createAccount = (form) => {
+    if (ref.current.users.some((user) => user.account === form.account))
+      return Promise.resolve({ ok: false, error: "เลขบัญชีนี้ถูกใช้แล้ว" });
+    const user = {
+      id: Date.now(),
+      account: form.account,
+      name: form.shopName,
+      fullName: form.fullName,
+      idCard: form.idCard,
+      password: form.password,
+      avatar: AVATAR_POOL[Math.floor(Math.random() * AVATAR_POOL.length)],
+      balance: 0,
+      piggy: 0,
+      dailyRent: 0,
+      negative: false,
+      qrEnabled: true,
+      qrVersion: 1,
+      hasCreditCard: false,
+      creditLimit: 0,
+      availableCredit: 0,
+      loan: null,
+      creditSchedules: [],
+      favoriteAccounts: [],
+      earnedBadges: [],
+    };
+    return mutate(
+      "create-account",
+      { type: "user_admin_upsert", user },
+      (state) => ({ ...state, users: [...state.users, normalizeUser(user)] }),
+    );
+  };
+  const addBadge = (badge) => {
+    const row = { id: newId(), ...badge };
+    return mutate(
+      "add-badge",
+      { type: "badge_upsert", badge: row },
+      (state) => ({ ...state, badges: [...state.badges, row] }),
+    );
+  };
+  const deleteBadge = (id) =>
+    mutate(`badge-${id}`, { type: "badge_delete", id }, (state) => ({
+      ...state,
+      badges: state.badges.filter((badge) => badge.id !== id),
+    }));
+  const updateGame = (key, state) =>
+    mutate(key, { type: "game_state", state }, (old) => ({
+      ...old,
+      gameState: state,
+    }));
+  const initializeGame = () =>
+    updateGame("initialize", {
+      day: 1,
+      hour: 6,
+      minute: 0,
+      timeScale: 1,
+      gamePaused: false,
+      announcement: "",
+    });
+  const togglePause = () =>
+    updateGame("pause", { ...gameState, gamePaused: !gameState.gamePaused });
+  const skipNight = () => {
+    const total = gameState.hour * 60 + gameState.minute + 720;
+    return updateGame("skip-night", {
+      ...gameState,
+      day: gameState.day + Math.floor(total / 1440),
+      hour: Math.floor((total % 1440) / 60),
+      minute: total % 60,
+    });
+  };
+  const publishAnnouncement = async () => {
+    const result = await updateGame("announcement", {
+      ...gameState,
+      announcement: announcementDraft,
+    });
+    if (result.ok) draftDirty.current = false;
+    return result;
+  };
+  const factoryReset = async () => {
+    if (resetPhrase !== "ยืนยัน") return;
+    const result = await mutate(
+      "reset",
+      { type: "factory_reset" },
+      null,
+      "รีเซ็ตระบบแล้ว",
+    );
+    if (result.ok) {
+      put(
+        {
+          users: [],
+          transactions: [],
+          topups: [],
+          loanRequests: [],
+          badges: [],
+          gameState: null,
+        },
+        true,
+      );
+      setShowResetConfirm(false);
+      setResetPhrase("");
+      draftDirty.current = false;
+      setAnnouncementDraft("");
+    }
+  };
+  const pending = topups.filter((row) => row.status === "pending");
+  const pendingLoans = loanRequests.filter((row) => row.status === "pending");
+  const totalBalance = users.reduce((sum, user) => sum + user.balance, 0);
+  const filteredUsers = users.filter(
+    (user) =>
+      String(user.name || "").includes(search) || user.account.includes(search),
+  );
+  const topupDecision = (id, status) => decision(id, status, false);
+  const loanDecision = (id, status) => decision(id, status, true);
   const TABS = [
     { key: "overview", label: "ภาพรวม", icon: LayoutDashboard },
     { key: "time", label: "เวลาเกม", icon: Clock },
-    { key: "topups", label: "คำขอเติมเงิน", icon: Wallet, badge: pending.length },
-    { key: "loans", label: "เงินกู้", icon: Banknote, badge: pendingLoans.length },
-    { key: "users", label: "ผู้ใช้", icon: Users },
+    {
+      key: "topups",
+      label: "คำขอเติมเงิน",
+      icon: Wallet,
+      badge: pending.length,
+    },
+    {
+      key: "loans",
+      label: "เงินกู้",
+      icon: Banknote,
+      badge: pendingLoans.length,
+    },
+    { key: "users", label: "บัญชีผู้ใช้", icon: Users },
     { key: "badges", label: "เหรียญ", icon: Award },
     { key: "announcement", label: "ประกาศ", icon: Megaphone },
   ];
 
-  if (initialLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center gap-3 bg-amber-50" style={{ fontFamily: "Prompt, sans-serif" }}>
-        <style>{FONT_IMPORT}</style>
-        <Loader2 size={28} className="text-orange-500 animate-spin" /> <span className="text-stone-400 text-sm">กำลังโหลดข้อมูล...</span>
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen overflow-y-auto pb-10 bg-amber-50" style={{ fontFamily: "Prompt, sans-serif" }}>
-      <style>{`${FONT_IMPORT} @keyframes jp-spin { to { transform: rotate(360deg); } } .jp-spin { animation: jp-spin 0.8s linear infinite; }`}</style>
+    <div
+      className="jp min-h-screen overflow-y-auto pb-10 bg-amber-50"
+      style={{ fontFamily: "Prompt, sans-serif" }}
+    >
+      <style>{`${DESIGN} @keyframes jp-spin { to { transform: rotate(360deg); } } .jp-spin { animation: jp-spin 0.8s linear infinite; }`}</style>
       <div className="sticky top-0 z-30 bg-white border-b-2 border-orange-100">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 pt-4 pb-3">
           <div className="flex items-center justify-between">
             <div>
-              <div className="font-bold text-lg text-stone-800" style={{ fontFamily: "Mitr, sans-serif" }}>🐷 JiwPay แอดมิน</div>
-              <div className="text-[11px] text-stone-400">{fmtGameTime(gameState)}</div>
+              <Brand admin />
+              <div className="text-[11px] text-stone-400">
+                {fmtGameTime(gameState)}
+              </div>
             </div>
             <div className="flex items-center gap-2">
-              <button onClick={doGlobalRefresh} disabled={globalRefreshing} className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-50 border-2 border-orange-100 text-xs font-semibold text-stone-600"><RefreshCw size={13} className={globalRefreshing ? "jp-spin" : ""} /> รีเฟรช</button>
-              <button onClick={onLogout} className="px-3 py-2 rounded-xl bg-stone-100 text-xs font-semibold text-stone-500">ออกจากระบบ</button>
+              <ActionButton
+                onClick={doGlobalRefresh}
+                aria-label="รีเฟรชข้อมูล"
+                disabled={globalRefreshing || !!busyAction}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-50 border-2 border-orange-100 text-xs font-semibold text-stone-600"
+              >
+                <RefreshCw
+                  size={13}
+                  className={globalRefreshing ? "jp-spin" : ""}
+                />{" "}
+                รีเฟรช
+              </ActionButton>
+              <ActionButton
+                disabled={!!busyAction}
+                onClick={onLogout}
+                className="px-3 py-2 rounded-xl bg-stone-100 text-xs font-semibold text-stone-500"
+              >
+                ออกจากระบบ
+              </ActionButton>
             </div>
           </div>
           <div className="flex gap-2 overflow-x-auto mt-4 pb-1">
             {TABS.map((t) => {
-              const Icon = t.icon; const active = tab === t.key;
-              return (<button key={t.key} onClick={() => setTab(t.key)} className={`flex items-center gap-2 whitespace-nowrap px-4 py-2.5 rounded-full text-sm font-semibold border-2 ${active ? "bg-orange-500 border-orange-600 text-white" : "bg-white border-orange-100 text-stone-500"}`}><Icon size={16} /> {t.label}{!!t.badge && <span className={`text-[10px] font-bold rounded-full px-1.5 py-0.5 ${active ? "bg-white text-orange-600" : "bg-pink-100 text-pink-600"}`}>{t.badge}</span>}</button>);
+              const Icon = t.icon;
+              const active = tab === t.key;
+              return (
+                <ActionButton
+                  key={t.key}
+                  onClick={() => setTab(t.key)}
+                  className={`flex items-center gap-2 whitespace-nowrap px-4 py-2.5 rounded-full text-sm font-semibold border-2 ${active ? "bg-orange-500 border-orange-600 text-white" : "bg-white border-orange-100 text-stone-500"}`}
+                >
+                  <Icon size={16} /> {t.label}
+                  {!!t.badge && (
+                    <span
+                      className={`text-[10px] font-bold rounded-full px-1.5 py-0.5 ${active ? "bg-white text-orange-600" : "bg-pink-100 text-pink-600"}`}
+                    >
+                      {t.badge}
+                    </span>
+                  )}
+                </ActionButton>
+              );
             })}
           </div>
         </div>
       </div>
 
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5">
-        {tab === "overview" && (
-          <div>
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-              <StatCard label="ผู้ใช้ทั้งหมด" value={users.length} icon={Users} tone="orange" />
-              <StatCard label="ยอดเงินรวมในระบบ" value={`${totalBalance.toLocaleString()} ฿`} icon={Wallet} tone="teal" />
-              <StatCard label="คำขอรอตรวจ" value={pending.length + pendingLoans.length} icon={Clock} tone="pink" />
-              <StatCard label="ธุรกรรมทั้งหมด" value={transactions.length} icon={TrendingUp} tone="amber" />
-            </div>
-            <div className="mt-6 bg-white rounded-2xl border-2 border-orange-100 p-4 sm:p-5">
-              <h3 className="font-semibold text-stone-800 mb-3" style={{ fontFamily: "Mitr, sans-serif" }}>กิจกรรมล่าสุด</h3>
-              <div className="divide-y divide-orange-50">
-                {transactions.slice(0, 8).map((t) => (<div key={t.id} className="flex items-center gap-3 py-3"><div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center text-lg">{Number(t.fromId) === 0 ? "🏦" : "👤"}</div><div className="flex-1 min-w-0 text-sm"><span className="font-semibold text-stone-800">{fmtAccount(String(t.fromId))}</span><span className="text-stone-400"> → {fmtAccount(String(t.toId))}</span><div className="text-xs text-stone-400">{t.type} · {t.memo} · วันที่ {t.day}</div></div><div className="font-bold text-sm text-stone-800" style={{ fontFamily: "Mitr, sans-serif" }}>{Number(t.amount).toLocaleString()}฿</div></div>))}
-                {transactions.length === 0 && <div className="text-center text-stone-400 text-sm py-6">ยังไม่มีธุรกรรม</div>}
-              </div>
-            </div>
-            <div className="mt-6 bg-white rounded-2xl border-2 border-pink-200 p-4 sm:p-5">
-              <div className="flex items-center gap-2 mb-2 text-pink-600 font-semibold" style={{ fontFamily: "Mitr, sans-serif" }}><AlertTriangle size={18} /> เขตอันตราย</div>
-              <p className="text-xs text-stone-400 mb-3">ล้างข้อมูลทั้งหมดกลับสู่ค่าเริ่มต้น — ลบทุกชีตยกเว้นหัวตาราง</p>
-              <button onClick={() => setShowResetConfirm(true)} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-pink-500 text-white text-sm font-semibold"><RotateCcw size={15} /> เริ่มเกมใหม่ (Factory Reset)</button>
-            </div>
-          </div>
-        )}
-
-        {tab === "time" && gameState && (
-          <div>
-            <h2 className="font-semibold text-xl text-stone-800 mb-1" style={{ fontFamily: "Mitr, sans-serif" }}>ระบบจัดการเวลาในเกม</h2>
-            <div className="bg-white rounded-2xl border-2 border-orange-100 p-5 text-center mb-4">
-              <div className="font-bold text-3xl text-stone-800" style={{ fontFamily: "Mitr, sans-serif" }}>{String(gameState.hour).padStart(2, "0")}:{String(gameState.minute).padStart(2, "0")} น.</div>
-              <div className="text-sm font-semibold text-orange-600 mt-1">วันที่ {gameState.day}</div>
-              {gameState.gamePaused && <div className="mt-2 inline-block text-xs font-bold text-pink-600 bg-pink-50 px-3 py-1 rounded-full">⏸️ หยุดชั่วคราว</div>}
-            </div>
-            <button onClick={togglePause} disabled={busyAction === "pause"} className={`w-full flex items-center justify-center gap-2 py-4 rounded-2xl font-semibold text-white mb-4 disabled:opacity-60 ${gameState.gamePaused ? "bg-teal-500" : "bg-stone-800"}`} style={{ fontFamily: "Mitr, sans-serif" }}>{busyAction === "pause" ? <Loader2 size={18} className="animate-spin" /> : (gameState.gamePaused ? <Play size={18} /> : <Pause size={18} />)} {gameState.gamePaused ? "เล่นต่อ" : "หยุดเกมชั่วคราว"}</button>
-            <button onClick={skipNight} disabled={busyAction === "skip-night"} className="w-full flex items-center justify-center gap-2 py-4 rounded-2xl font-semibold text-white bg-orange-500 disabled:opacity-60">{busyAction === "skip-night" ? <Loader2 size={18} className="animate-spin" /> : <SkipForward size={18} />} ข้ามคืน (+12 ชม.)</button>
-            <p className="text-xs text-stone-400 mt-3">💡 ค่าเช่า/ดอกเบี้ย/ค่าปรับเงินกู้คำนวณอัตโนมัติทุกวันผ่าน Apps Script trigger (runDailyRollover)</p>
-          </div>
-        )}
-
-        {tab === "topups" && (
-          <div>
-            <h2 className="font-semibold text-xl text-stone-800 mb-4" style={{ fontFamily: "Mitr, sans-serif" }}>คำขอเติมเงิน</h2>
-            <div className="space-y-2.5">
-              {pending.map((r) => {
-                const u = users.find((x) => String(x.id) === String(r.userId));
-                const rowBusy = processingRow === r.id;
-                return (
-                  <div key={r.id} className="bg-white border-2 border-orange-100 rounded-xl p-3.5 flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-xl bg-amber-50 flex items-center justify-center text-xl shrink-0">{u?.avatar}</div>
-                    <div className="flex-1 min-w-0"><div className="text-sm font-semibold text-stone-800">{u?.name}</div><div className="text-[11px] text-stone-400">{r.reason} · วันที่ {r.day}</div><div className="font-bold text-orange-600" style={{ fontFamily: "Mitr, sans-serif" }}>ขอเติม {Number(r.amount).toLocaleString()} ฿</div></div>
-                    <div className="flex flex-col gap-1.5 shrink-0">
-                      <button disabled={rowBusy} onClick={() => topupDecision(r.id, "approved")} className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-teal-500 text-white text-xs font-semibold disabled:opacity-60">{rowBusy ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />} อนุมัติ</button>
-                      <button disabled={rowBusy} onClick={() => topupDecision(r.id, "rejected")} className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-pink-50 border-2 border-pink-200 text-pink-600 text-xs font-semibold disabled:opacity-60"><XCircle size={13} /> ปฏิเสธ</button>
-                    </div>
-                  </div>
-                );
-              })}
-              {pending.length === 0 && <div className="text-center text-stone-400 text-sm py-8 bg-white rounded-2xl border-2 border-orange-100">ไม่มีคำขอที่รอตรวจสอบ 🎉</div>}
-            </div>
-          </div>
-        )}
-
-        {tab === "loans" && (
-          <div>
-            <h2 className="font-semibold text-xl text-stone-800 mb-4" style={{ fontFamily: "Mitr, sans-serif" }}>คำขอกู้เงิน</h2>
-            <div className="space-y-2.5">
-              {pendingLoans.map((r) => {
-                const u = users.find((x) => String(x.id) === String(r.userId));
-                const rowBusy = processingRow === r.id;
-                return (
-                  <div key={r.id} className="bg-white border-2 border-orange-100 rounded-xl p-3.5 flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-xl bg-amber-50 flex items-center justify-center text-xl shrink-0">{u?.avatar}</div>
-                    <div className="flex-1 min-w-0"><div className="text-sm font-semibold text-stone-800">{u?.name}</div><div className="text-[11px] text-stone-400">{r.days} วัน · ดอกเบี้ย {Math.round(r.rate * 100)}%</div><div className="font-bold text-orange-600" style={{ fontFamily: "Mitr, sans-serif" }}>ขอกู้ {Number(r.amount).toLocaleString()} ฿</div></div>
-                    <div className="flex flex-col gap-1.5 shrink-0">
-                      <button disabled={rowBusy} onClick={() => loanDecision(r.id, "approved")} className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-teal-500 text-white text-xs font-semibold disabled:opacity-60">{rowBusy ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />} อนุมัติ</button>
-                      <button disabled={rowBusy} onClick={() => loanDecision(r.id, "rejected")} className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-pink-50 border-2 border-pink-200 text-pink-600 text-xs font-semibold disabled:opacity-60"><XCircle size={13} /> ปฏิเสธ</button>
-                    </div>
-                  </div>
-                );
-              })}
-              {pendingLoans.length === 0 && <div className="text-center text-stone-400 text-sm py-8 bg-white rounded-2xl border-2 border-orange-100">ไม่มีคำขอกู้เงินที่รอตรวจ</div>}
-            </div>
-          </div>
-        )}
-
-        {tab === "users" && (
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="font-semibold text-xl text-stone-800" style={{ fontFamily: "Mitr, sans-serif" }}>จัดการผู้ใช้</h2>
-              <button onClick={() => setShowCreateAccount(true)} className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-orange-500 text-white text-sm font-semibold"><UserPlus size={16} /> สร้างบัญชี</button>
-            </div>
-            <div className="relative mb-4"><Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-stone-400" /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหาชื่อร้านหรือเลขบัญชี" className="w-full pl-10 pr-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300" /></div>
-            <div className="bg-white rounded-2xl border-2 border-orange-100 overflow-hidden">
-              {filteredUsers.map((u, i) => (
-                <div key={u.id} className={`p-4 ${i !== 0 ? "border-t border-orange-50" : ""}`}>
-                  <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-xl bg-amber-50 flex items-center justify-center text-xl shrink-0">{u.avatar}</div>
-                    <div className="flex-1 min-w-0"><div className="text-sm font-semibold text-stone-800 truncate flex items-center gap-1.5">{u.name} {!u.qrEnabled && <ShieldOff size={13} className="text-pink-500" />}</div><div className="text-xs text-stone-400">เลขบัญชี {fmtAccount(u.account)} · บัตร v{u.qrVersion}</div></div>
-                    <div className="text-right shrink-0">
-                      <div className={`text-sm font-bold ${u.negative ? "text-pink-500" : "text-stone-800"}`} style={{ fontFamily: "Mitr, sans-serif" }}>{Number(u.balance).toLocaleString()} ฿</div>
-                      <div className="text-[10px] text-teal-600 font-medium">กระปุก {Number(u.piggy || 0).toLocaleString()} ฿</div>
-                      {u.hasCreditCard && <div className="text-[10px] text-stone-500 font-medium">เครดิต {Number(u.availableCredit || 0).toLocaleString()}/{Number(u.creditLimit || 0).toLocaleString()} ฿</div>}
-                      <button onClick={() => setEditUser(u)} className="text-xs font-semibold text-orange-600 mt-1">แก้ไขยอดเงิน</button>
-                    </div>
-                  </div>
-                  <div className="flex gap-2 mt-3">
-                    <button disabled={busyAction === `qr-${u.id}`} onClick={() => toggleQr(u)} className={`flex items-center gap-1.5 flex-1 justify-center py-2 rounded-lg text-xs font-semibold disabled:opacity-60 ${u.qrEnabled ? "bg-pink-50 text-pink-600 border-2 border-pink-200" : "bg-teal-50 text-teal-600 border-2 border-teal-200"}`}>{busyAction === `qr-${u.id}` ? <Loader2 size={13} className="animate-spin" /> : (u.qrEnabled ? <ShieldOff size={13} /> : <ShieldCheck size={13} />)} {u.qrEnabled ? "ระงับ QR" : "เปิดใช้งาน QR"}</button>
-                    <button disabled={busyAction === `reissue-${u.id}`} onClick={() => reissueQr(u)} className="flex items-center gap-1.5 flex-1 justify-center py-2 rounded-lg text-xs font-semibold bg-stone-50 text-stone-600 border-2 border-stone-200 disabled:opacity-60">{busyAction === `reissue-${u.id}` ? <Loader2 size={13} className="animate-spin" /> : <QrCode size={13} />} ออกบัตรใหม่</button>
-                  </div>
-                  <button disabled={busyAction === `credit-${u.id}`} onClick={() => issueCreditCard(u)} className="w-full flex items-center justify-center gap-1.5 mt-2 py-2 rounded-lg text-xs font-semibold bg-stone-800 text-white disabled:opacity-60">
-                    {busyAction === `credit-${u.id}` ? <Loader2 size={13} className="animate-spin" /> : <Banknote size={13} />} {u.hasCreditCard ? `คำนวณวงเงินใหม่ (${Math.floor((u.piggy || 0) * 0.5).toLocaleString()} ฿)` : "ออกบัตรเครดิต (50% ของกระปุก)"}
-                  </button>
-                  <div className="flex items-center gap-2 mt-2 bg-amber-50 border-2 border-amber-100 rounded-lg px-3 py-2">
-                    <span className="text-xs font-semibold text-stone-600 shrink-0">💸 ค่าเช่ารายวัน</span>
-                    <input defaultValue={u.dailyRent || 0} onBlur={(e) => setDailyRent(u, Number(e.target.value.replace(/[^0-9]/g, "")) || 0)} inputMode="numeric" className="flex-1 min-w-0 px-2 py-1 rounded-md border border-amber-200 text-sm font-bold text-center outline-none bg-white" style={{ fontFamily: "Mitr, sans-serif" }} />
-                    <span className="text-xs text-stone-400 shrink-0">฿/วัน</span>
-                  </div>
-                </div>
-              ))}
-              {filteredUsers.length === 0 && <div className="text-center text-stone-400 text-sm py-8">ไม่พบผู้ใช้</div>}
-            </div>
-          </div>
-        )}
-
-        {tab === "badges" && (
-          <div>
-            <div className="flex items-center justify-between mb-4"><h2 className="font-semibold text-xl text-stone-800" style={{ fontFamily: "Mitr, sans-serif" }}>จัดการเหรียญรางวัล</h2><button onClick={() => setShowAddBadge(true)} className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-orange-500 text-white text-sm font-semibold"><Plus size={16} /> เพิ่มเหรียญ</button></div>
-            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {badges.map((b) => (<div key={b.id} className="bg-white rounded-2xl border-2 border-orange-100 p-4"><div className="flex items-start justify-between"><div className="text-3xl">{b.icon}</div><button onClick={() => deleteBadge(b.id)} className="w-8 h-8 rounded-lg bg-pink-50 flex items-center justify-center text-pink-500"><Trash2 size={14} /></button></div><div className="font-semibold text-stone-800 text-sm mt-3" style={{ fontFamily: "Mitr, sans-serif" }}>{b.label}</div><div className="text-xs text-stone-400 mt-1">{b.criteria}</div><div className="text-[10px] text-orange-500 font-semibold mt-2 bg-orange-50 inline-block px-2 py-0.5 rounded-full">{b.conditionType} ≥ {b.threshold}</div></div>))}
-            </div>
-          </div>
-        )}
-
-        {tab === "announcement" && gameState && (
-          <div>
-            <h2 className="font-semibold text-xl text-stone-800 mb-4" style={{ fontFamily: "Mitr, sans-serif" }}>ระบบประกาศ</h2>
-            <div className="bg-white rounded-2xl border-2 border-orange-100 p-5">
-              <div className="text-xs font-semibold text-stone-500 mb-1.5">ประกาศปัจจุบัน</div>
-              <div className="rounded-xl bg-stone-800 text-white text-sm px-4 py-3 mb-4">📢 {gameState.announcement || "(ยังไม่มีข้อความ)"}</div>
-              <textarea value={announcementDraft} onChange={(e) => setAnnouncementDraft(e.target.value)} rows={3} className="w-full px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300 mb-3" />
-              <button onClick={publishAnnouncement} disabled={busyAction === "announcement"} className="w-full py-3 rounded-xl bg-orange-500 text-white font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-60">{busyAction === "announcement" && <Loader2 size={15} className="animate-spin" />} เผยแพร่ประกาศ</button>
-            </div>
-          </div>
+      <div className="max-w-5xl mx-auto px-4 pt-3">
+        <Notice>{syncError}</Notice>
+        {!authorized && !syncError && (
+          <p className="text-xs text-stone-400">กำลังตรวจสอบสิทธิ์ผู้ดูแล...</p>
         )}
       </div>
+      <fieldset
+        disabled={!!busyAction || !authorized}
+        className="border-0 p-0 min-w-0"
+      >
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5">
+          {tab === "overview" && (
+            <div>
+              <h1 className="jp-heading text-xl mb-4">ภาพรวมระบบ</h1>
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <StatCard
+                  label="ผู้ใช้ทั้งหมด"
+                  value={users.length}
+                  icon={Users}
+                  tone="orange"
+                />
+                <StatCard
+                  label="ยอดเงินรวมในระบบ"
+                  value={`${totalBalance.toLocaleString()} ฿`}
+                  icon={Wallet}
+                  tone="teal"
+                />
+                <StatCard
+                  label="คำขอรอตรวจ"
+                  value={pending.length + pendingLoans.length}
+                  icon={Clock}
+                  tone="pink"
+                />
+                <StatCard
+                  label="ธุรกรรมทั้งหมด"
+                  value={transactions.length}
+                  icon={TrendingUp}
+                  tone="amber"
+                />
+              </div>
+              <div className="mt-6 bg-white rounded-2xl border-2 border-orange-100 p-4 sm:p-5">
+                <h3
+                  className="font-semibold text-stone-800 mb-3"
+                  style={{ fontFamily: "Mitr, sans-serif" }}
+                >
+                  กิจกรรมล่าสุด
+                </h3>
+                <div className="divide-y divide-orange-50">
+                  {transactions.slice(0, 8).map((t) => (
+                    <div key={t.id} className="flex items-center gap-3 py-3">
+                      <div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center text-lg">
+                        {Number(t.fromId) === 0 ? "🏦" : "👤"}
+                      </div>
+                      <div className="flex-1 min-w-0 text-sm">
+                        <span className="font-semibold text-stone-800">
+                          {fmtAccount(String(t.fromId))}
+                        </span>
+                        <span className="text-stone-400">
+                          {" "}
+                          → {fmtAccount(String(t.toId))}
+                        </span>
+                        <div className="text-xs text-stone-400">
+                          {t.type} · {t.memo} · วันที่ {t.day}
+                        </div>
+                      </div>
+                      <div
+                        className="font-bold text-sm text-stone-800"
+                        style={{ fontFamily: "Mitr, sans-serif" }}
+                      >
+                        {Number(t.amount).toLocaleString()}฿
+                      </div>
+                    </div>
+                  ))}
+                  {transactions.length === 0 && (
+                    <div className="text-center text-stone-400 text-sm py-6">
+                      ยังไม่มีธุรกรรม
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="mt-6 bg-white rounded-2xl border-2 border-pink-200 p-4 sm:p-5">
+                <div
+                  className="flex items-center gap-2 mb-2 text-pink-600 font-semibold"
+                  style={{ fontFamily: "Mitr, sans-serif" }}
+                >
+                  <AlertTriangle size={18} /> เขตอันตราย
+                </div>
+                <p className="text-xs text-stone-400 mb-3">
+                  ล้างข้อมูลทั้งหมดกลับสู่ค่าเริ่มต้น — ลบทุกชีตยกเว้นหัวตาราง
+                </p>
+                <ActionButton
+                  onClick={() => setShowResetConfirm(true)}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-pink-500 text-white text-sm font-semibold"
+                >
+                  <RotateCcw size={15} /> เริ่มเกมใหม่ (Factory Reset)
+                </ActionButton>
+              </div>
+            </div>
+          )}
 
-      {editUser && <Modal title={`แก้ไขยอดเงิน · ${editUser.name}`} onClose={() => setEditUser(null)}><BalanceEditor user={editUser} busy={busyAction === `balance-${editUser.id}`} onApply={(delta) => { adjustBalance(editUser.id, delta); setEditUser(null); }} /></Modal>}
-      {showAddBadge && <AddBadgeModal busy={busyAction === "add-badge"} onClose={() => setShowAddBadge(false)} onAdd={(b) => { addBadge(b); setShowAddBadge(false); }} />}
-      {showCreateAccount && <CreateAccountModal busy={busyAction === "create-account"} onClose={() => setShowCreateAccount(false)} onCreate={createAccount} existingAccounts={users.map((u) => u.account)} />}
-      {showResetConfirm && (
-        <Modal title="ยืนยันการรีเซ็ตเกม" onClose={() => setShowResetConfirm(false)}>
-          <div className="flex items-center gap-2 bg-pink-50 border-2 border-pink-300 text-pink-600 rounded-xl px-4 py-3 text-xs font-semibold mb-4"><AlertTriangle size={18} /> การกระทำนี้จะลบข้อมูลทุกชีตทันที ไม่สามารถย้อนกลับได้</div>
-          <label className="text-xs font-semibold text-stone-500">พิมพ์คำว่า "ยืนยัน" เพื่อดำเนินการต่อ</label>
-          <input value={resetPhrase} onChange={(e) => setResetPhrase(e.target.value)} className="w-full mt-1 mb-4 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300" />
-          <button disabled={resetPhrase !== "ยืนยัน" || busyAction === "reset"} onClick={factoryReset} className="w-full py-3.5 rounded-xl font-semibold text-white disabled:bg-stone-200 bg-pink-500 flex items-center justify-center gap-2">{busyAction === "reset" && <Loader2 size={16} className="animate-spin" />} เริ่มเกมใหม่ (ลบข้อมูลทั้งหมด)</button>
-        </Modal>
-      )}
+          {tab === "time" && !gameState && (
+            <div className="jp-card p-6 text-center">
+              <p>กำลังซิงค์เวลา...</p>
+              <ActionButton
+                onClick={initializeGame}
+                className="jp-primary mt-4"
+              >
+                ตั้งเวลาเริ่มต้น 06:00 น.
+              </ActionButton>
+            </div>
+          )}
+          {tab === "time" && gameState && (
+            <div>
+              <h2
+                className="font-semibold text-xl text-stone-800 mb-1"
+                style={{ fontFamily: "Mitr, sans-serif" }}
+              >
+                ระบบจัดการเวลาในเกม
+              </h2>
+              <div className="bg-white rounded-2xl border-2 border-orange-100 p-5 text-center mb-4">
+                <div
+                  className="font-bold text-3xl text-stone-800"
+                  style={{ fontFamily: "Mitr, sans-serif" }}
+                >
+                  {String(gameState.hour).padStart(2, "0")}:
+                  {String(gameState.minute).padStart(2, "0")} น.
+                </div>
+                <div className="text-sm font-semibold text-orange-600 mt-1">
+                  วันที่ {gameState.day}
+                </div>
+                {gameState.gamePaused && (
+                  <div className="mt-2 inline-block text-xs font-bold text-pink-600 bg-pink-50 px-3 py-1 rounded-full">
+                    ⏸️ หยุดชั่วคราว
+                  </div>
+                )}
+              </div>
+              <ActionButton
+                onClick={togglePause}
+                disabled={busyAction === "pause"}
+                className={`w-full flex items-center justify-center gap-2 py-4 rounded-2xl font-semibold text-white mb-4 disabled:opacity-60 ${gameState.gamePaused ? "bg-teal-500" : "bg-stone-800"}`}
+                style={{ fontFamily: "Mitr, sans-serif" }}
+              >
+                {busyAction === "pause" ? (
+                  <Loader2 size={18} className="animate-spin" />
+                ) : gameState.gamePaused ? (
+                  <Play size={18} />
+                ) : (
+                  <Pause size={18} />
+                )}{" "}
+                {gameState.gamePaused ? "เล่นต่อ" : "หยุดเกมชั่วคราว"}
+              </ActionButton>
+              <ActionButton
+                onClick={skipNight}
+                disabled={busyAction === "skip-night"}
+                className="w-full flex items-center justify-center gap-2 py-4 rounded-2xl font-semibold text-white bg-orange-500 disabled:opacity-60"
+              >
+                {busyAction === "skip-night" ? (
+                  <Loader2 size={18} className="animate-spin" />
+                ) : (
+                  <SkipForward size={18} />
+                )}{" "}
+                ข้ามคืน (+12 ชม.)
+              </ActionButton>
+              <p className="text-xs text-stone-400 mt-3">
+                💡 ค่าเช่า/ดอกเบี้ย/ค่าปรับเงินกู้คำนวณอัตโนมัติทุกวันผ่าน Apps
+                Script trigger (runDailyRollover)
+              </p>
+            </div>
+          )}
 
+          {tab === "topups" && (
+            <div>
+              <h2
+                className="font-semibold text-xl text-stone-800 mb-4"
+                style={{ fontFamily: "Mitr, sans-serif" }}
+              >
+                คำขอเติมเงิน
+              </h2>
+              <div className="space-y-2.5">
+                {pending.map((r) => {
+                  const u = users.find(
+                    (x) => String(x.id) === String(r.userId),
+                  );
+                  const rowBusy = !!busyAction || !authorized;
+                  return (
+                    <div
+                      key={r.id}
+                      className="bg-white border-2 border-orange-100 rounded-xl p-3.5 flex items-center gap-3"
+                    >
+                      <div className="w-11 h-11 rounded-xl bg-amber-50 flex items-center justify-center text-xl shrink-0">
+                        {u?.avatar}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-stone-800">
+                          {u?.name}
+                        </div>
+                        <div className="text-[11px] text-stone-400">
+                          {r.reason} · วันที่ {r.day}
+                        </div>
+                        <div
+                          className="font-bold text-orange-600"
+                          style={{ fontFamily: "Mitr, sans-serif" }}
+                        >
+                          ขอเติม {Number(r.amount).toLocaleString()} ฿
+                        </div>
+                      </div>
+                      <div className="flex flex-col gap-1.5 shrink-0">
+                        <ActionButton
+                          disabled={rowBusy}
+                          onClick={() => topupDecision(r.id, "approved")}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-teal-500 text-white text-xs font-semibold disabled:opacity-60"
+                        >
+                          {rowBusy ? (
+                            <Loader2 size={13} className="animate-spin" />
+                          ) : (
+                            <CheckCircle2 size={13} />
+                          )}{" "}
+                          อนุมัติ
+                        </ActionButton>
+                        <ActionButton
+                          disabled={rowBusy}
+                          onClick={() => topupDecision(r.id, "rejected")}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-pink-50 border-2 border-pink-200 text-pink-600 text-xs font-semibold disabled:opacity-60"
+                        >
+                          <XCircle size={13} /> ปฏิเสธ
+                        </ActionButton>
+                      </div>
+                    </div>
+                  );
+                })}
+                {pending.length === 0 && (
+                  <div className="text-center text-stone-400 text-sm py-8 bg-white rounded-2xl border-2 border-orange-100">
+                    ไม่มีคำขอที่รอตรวจสอบ 🎉
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {tab === "loans" && (
+            <div>
+              <h2
+                className="font-semibold text-xl text-stone-800 mb-4"
+                style={{ fontFamily: "Mitr, sans-serif" }}
+              >
+                คำขอกู้เงิน
+              </h2>
+              <div className="space-y-2.5">
+                {pendingLoans.map((r) => {
+                  const u = users.find(
+                    (x) => String(x.id) === String(r.userId),
+                  );
+                  const rowBusy = !!busyAction || !authorized;
+                  return (
+                    <div
+                      key={r.id}
+                      className="bg-white border-2 border-orange-100 rounded-xl p-3.5 flex items-center gap-3"
+                    >
+                      <div className="w-11 h-11 rounded-xl bg-amber-50 flex items-center justify-center text-xl shrink-0">
+                        {u?.avatar}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-stone-800">
+                          {u?.name}
+                        </div>
+                        <div className="text-[11px] text-stone-400">
+                          {r.days} วัน · ดอกเบี้ย {Math.round(r.rate * 100)}%
+                        </div>
+                        <div
+                          className="font-bold text-orange-600"
+                          style={{ fontFamily: "Mitr, sans-serif" }}
+                        >
+                          ขอกู้ {Number(r.amount).toLocaleString()} ฿
+                        </div>
+                      </div>
+                      <div className="flex flex-col gap-1.5 shrink-0">
+                        <ActionButton
+                          disabled={rowBusy}
+                          onClick={() => loanDecision(r.id, "approved")}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-teal-500 text-white text-xs font-semibold disabled:opacity-60"
+                        >
+                          {rowBusy ? (
+                            <Loader2 size={13} className="animate-spin" />
+                          ) : (
+                            <CheckCircle2 size={13} />
+                          )}{" "}
+                          อนุมัติ
+                        </ActionButton>
+                        <ActionButton
+                          disabled={rowBusy}
+                          onClick={() => loanDecision(r.id, "rejected")}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-pink-50 border-2 border-pink-200 text-pink-600 text-xs font-semibold disabled:opacity-60"
+                        >
+                          <XCircle size={13} /> ปฏิเสธ
+                        </ActionButton>
+                      </div>
+                    </div>
+                  );
+                })}
+                {pendingLoans.length === 0 && (
+                  <div className="text-center text-stone-400 text-sm py-8 bg-white rounded-2xl border-2 border-orange-100">
+                    ไม่มีคำขอกู้เงินที่รอตรวจ
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {tab === "users" && (
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <h2
+                  className="font-semibold text-xl text-stone-800"
+                  style={{ fontFamily: "Mitr, sans-serif" }}
+                >
+                  จัดการผู้ใช้
+                </h2>
+                <ActionButton
+                  onClick={() => setShowCreateAccount(true)}
+                  className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-orange-500 text-white text-sm font-semibold"
+                >
+                  <UserPlus size={16} /> สร้างบัญชี
+                </ActionButton>
+              </div>
+              <div className="relative mb-4">
+                <Search
+                  size={16}
+                  className="absolute left-3.5 top-1/2 -translate-y-1/2 text-stone-400"
+                />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="ค้นหาชื่อร้านหรือเลขบัญชี"
+                  className="w-full pl-10 pr-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"
+                />
+              </div>
+              <div className="bg-white rounded-2xl border-2 border-orange-100 overflow-hidden">
+                {filteredUsers.map((u, i) => (
+                  <div
+                    key={u.id}
+                    className={`p-4 ${i !== 0 ? "border-t border-orange-50" : ""}`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-xl bg-amber-50 flex items-center justify-center text-xl shrink-0">
+                        {u.avatar}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-stone-800 truncate flex items-center gap-1.5">
+                          {u.name}{" "}
+                          {!u.qrEnabled && (
+                            <ShieldOff size={13} className="text-pink-500" />
+                          )}
+                        </div>
+                        <div className="text-xs text-stone-400">
+                          เลขบัญชี {fmtAccount(u.account)} · บัตร v{u.qrVersion}
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div
+                          className={`text-sm font-bold ${u.negative ? "text-pink-500" : "text-stone-800"}`}
+                          style={{ fontFamily: "Mitr, sans-serif" }}
+                        >
+                          {Number(u.balance).toLocaleString()} ฿
+                        </div>
+                        <div className="text-[10px] text-teal-600 font-medium">
+                          กระปุก {Number(u.piggy || 0).toLocaleString()} ฿
+                        </div>
+                        {u.hasCreditCard && (
+                          <div className="text-[10px] text-stone-500 font-medium">
+                            เครดิต{" "}
+                            {Number(u.availableCredit || 0).toLocaleString()}/
+                            {Number(u.creditLimit || 0).toLocaleString()} ฿
+                          </div>
+                        )}
+                        <ActionButton
+                          onClick={() => setEditUser(u)}
+                          className="text-xs font-semibold text-orange-600 mt-1"
+                        >
+                          แก้ไขยอดเงิน
+                        </ActionButton>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 mt-3">
+                      <ActionButton
+                        disabled={busyAction === `qr-${u.id}`}
+                        onClick={() => toggleQr(u)}
+                        className={`flex items-center gap-1.5 flex-1 justify-center py-2 rounded-lg text-xs font-semibold disabled:opacity-60 ${u.qrEnabled ? "bg-pink-50 text-pink-600 border-2 border-pink-200" : "bg-teal-50 text-teal-600 border-2 border-teal-200"}`}
+                      >
+                        {busyAction === `qr-${u.id}` ? (
+                          <Loader2 size={13} className="animate-spin" />
+                        ) : u.qrEnabled ? (
+                          <ShieldOff size={13} />
+                        ) : (
+                          <ShieldCheck size={13} />
+                        )}{" "}
+                        {u.qrEnabled ? "ระงับ QR" : "เปิดใช้งาน QR"}
+                      </ActionButton>
+                      <ActionButton
+                        disabled={busyAction === `reissue-${u.id}`}
+                        onClick={() => reissueQr(u)}
+                        className="flex items-center gap-1.5 flex-1 justify-center py-2 rounded-lg text-xs font-semibold bg-stone-50 text-stone-600 border-2 border-stone-200 disabled:opacity-60"
+                      >
+                        {busyAction === `reissue-${u.id}` ? (
+                          <Loader2 size={13} className="animate-spin" />
+                        ) : (
+                          <QrCode size={13} />
+                        )}{" "}
+                        ออกบัตรใหม่
+                      </ActionButton>
+                    </div>
+                    <ActionButton
+                      disabled={busyAction === `credit-${u.id}`}
+                      onClick={() => issueCreditCard(u)}
+                      className="w-full flex items-center justify-center gap-1.5 mt-2 py-2 rounded-lg text-xs font-semibold bg-stone-800 text-white disabled:opacity-60"
+                    >
+                      {busyAction === `credit-${u.id}` ? (
+                        <Loader2 size={13} className="animate-spin" />
+                      ) : (
+                        <Banknote size={13} />
+                      )}{" "}
+                      {u.hasCreditCard
+                        ? `คำนวณวงเงินใหม่ (${Math.floor((u.piggy || 0) * 0.5).toLocaleString()} ฿)`
+                        : "ออกบัตรเครดิต (50% ของกระปุก)"}
+                    </ActionButton>
+                    <div className="flex items-center gap-2 mt-2 bg-amber-50 border-2 border-amber-100 rounded-lg px-3 py-2">
+                      <span className="text-xs font-semibold text-stone-600 shrink-0">
+                        💸 ค่าเช่ารายวัน
+                      </span>
+                      <input
+                        defaultValue={u.dailyRent || 0}
+                        onBlur={(e) =>
+                          setDailyRent(
+                            u,
+                            Number(e.target.value.replace(/[^0-9]/g, "")) || 0,
+                          )
+                        }
+                        inputMode="numeric"
+                        className="flex-1 min-w-0 px-2 py-1 rounded-md border border-amber-200 text-sm font-bold text-center outline-none bg-white"
+                        style={{ fontFamily: "Mitr, sans-serif" }}
+                      />
+                      <span className="text-xs text-stone-400 shrink-0">
+                        ฿/วัน
+                      </span>
+                    </div>
+                    <VisaCard user={u} />
+                  </div>
+                ))}
+                {filteredUsers.length === 0 && (
+                  <div className="text-center text-stone-400 text-sm py-8">
+                    ไม่พบผู้ใช้
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {tab === "badges" && (
+            <div>
+              <div className="flex items-center justify-between mb-4">
+                <h2
+                  className="font-semibold text-xl text-stone-800"
+                  style={{ fontFamily: "Mitr, sans-serif" }}
+                >
+                  จัดการเหรียญรางวัล
+                </h2>
+                <ActionButton
+                  onClick={() => setShowAddBadge(true)}
+                  className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-orange-500 text-white text-sm font-semibold"
+                >
+                  <Plus size={16} /> เพิ่มเหรียญ
+                </ActionButton>
+              </div>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {badges.map((b) => (
+                  <div
+                    key={b.id}
+                    className="bg-white rounded-2xl border-2 border-orange-100 p-4"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="text-3xl">{b.icon}</div>
+                      <ActionButton
+                        onClick={() => deleteBadge(b.id)}
+                        className="w-8 h-8 rounded-lg bg-pink-50 flex items-center justify-center text-pink-500"
+                      >
+                        <Trash2 size={14} />
+                      </ActionButton>
+                    </div>
+                    <div
+                      className="font-semibold text-stone-800 text-sm mt-3"
+                      style={{ fontFamily: "Mitr, sans-serif" }}
+                    >
+                      {b.label}
+                    </div>
+                    <div className="text-xs text-stone-400 mt-1">
+                      {b.criteria}
+                    </div>
+                    <div className="text-[10px] text-orange-500 font-semibold mt-2 bg-orange-50 inline-block px-2 py-0.5 rounded-full">
+                      {b.conditionType} ≥ {b.threshold}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {tab === "announcement" && gameState && (
+            <div>
+              <h2
+                className="font-semibold text-xl text-stone-800 mb-4"
+                style={{ fontFamily: "Mitr, sans-serif" }}
+              >
+                ระบบประกาศ
+              </h2>
+              <div className="bg-white rounded-2xl border-2 border-orange-100 p-5">
+                <div className="text-xs font-semibold text-stone-500 mb-1.5">
+                  ประกาศปัจจุบัน
+                </div>
+                <div className="rounded-xl bg-stone-800 text-white text-sm px-4 py-3 mb-4">
+                  📢 {gameState.announcement || "(ยังไม่มีข้อความ)"}
+                </div>
+                <textarea
+                  value={announcementDraft}
+                  onChange={(e) => {
+                    draftDirty.current = true;
+                    setAnnouncementDraft(e.target.value);
+                  }}
+                  rows={3}
+                  className="w-full px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300 mb-3"
+                />
+                <ActionButton
+                  onClick={publishAnnouncement}
+                  disabled={busyAction === "announcement"}
+                  className="w-full py-3 rounded-xl bg-orange-500 text-white font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  {busyAction === "announcement" && (
+                    <Loader2 size={15} className="animate-spin" />
+                  )}{" "}
+                  เผยแพร่ประกาศ
+                </ActionButton>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {editUser && (
+          <Modal
+            title={`แก้ไขยอดเงิน · ${editUser.name}`}
+            onClose={() => setEditUser(null)}
+          >
+            <BalanceEditor
+              user={editUser}
+              busy={busyAction === `balance-${editUser.id}`}
+              onApply={async (delta) => {
+                const result = await adjustBalance(editUser.id, delta);
+                if (result.ok) setEditUser(null);
+              }}
+            />
+          </Modal>
+        )}
+        {showAddBadge && (
+          <AddBadgeModal
+            busy={busyAction === "add-badge"}
+            onClose={() => setShowAddBadge(false)}
+            onAdd={async (b) => {
+              const result = await addBadge(b);
+              if (result.ok) setShowAddBadge(false);
+            }}
+          />
+        )}
+        {showCreateAccount && (
+          <CreateAccountModal
+            busy={busyAction === "create-account"}
+            onClose={() => setShowCreateAccount(false)}
+            onCreate={createAccount}
+            existingAccounts={users.map((u) => u.account)}
+          />
+        )}
+        {showResetConfirm && (
+          <Modal
+            title="ยืนยันการรีเซ็ตเกม"
+            onClose={() => setShowResetConfirm(false)}
+          >
+            <div className="flex items-center gap-2 bg-pink-50 border-2 border-pink-300 text-pink-600 rounded-xl px-4 py-3 text-xs font-semibold mb-4">
+              <AlertTriangle size={18} /> การกระทำนี้จะลบข้อมูลทุกชีตทันที
+              ไม่สามารถย้อนกลับได้
+            </div>
+            <label className="text-xs font-semibold text-stone-500">
+              พิมพ์คำว่า "ยืนยัน" เพื่อดำเนินการต่อ
+            </label>
+            <input
+              value={resetPhrase}
+              onChange={(e) => setResetPhrase(e.target.value)}
+              className="w-full mt-1 mb-4 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"
+            />
+            <ActionButton
+              disabled={resetPhrase !== "ยืนยัน" || busyAction === "reset"}
+              onClick={factoryReset}
+              className="w-full py-3.5 rounded-xl font-semibold text-white disabled:bg-stone-200 bg-pink-500 flex items-center justify-center gap-2"
+            >
+              {busyAction === "reset" && (
+                <Loader2 size={16} className="animate-spin" />
+              )}{" "}
+              เริ่มเกมใหม่ (ลบข้อมูลทั้งหมด)
+            </ActionButton>
+          </Modal>
+        )}
+      </fieldset>
+      <PendingBanner active={busyAction} />
       {toast && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[90] w-[92%] max-w-sm">
           <div className="bg-white rounded-2xl shadow-xl border-2 border-teal-200 p-4 flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-teal-500 flex items-center justify-center shrink-0"><CheckCircle2 size={18} className="text-white" /></div>
-            <div className="min-w-0"><div className="font-semibold text-sm text-stone-800" style={{ fontFamily: "Mitr, sans-serif" }}>{toast.title}</div>{toast.detail && <div className="text-xs text-stone-500 truncate">{toast.detail}</div>}</div>
+            <div className="w-10 h-10 rounded-xl bg-teal-500 flex items-center justify-center shrink-0">
+              <CheckCircle2 size={18} className="text-white" />
+            </div>
+            <div className="min-w-0">
+              <div
+                className="font-semibold text-sm text-stone-800"
+                style={{ fontFamily: "Mitr, sans-serif" }}
+              >
+                {toast.title}
+              </div>
+              {toast.detail && (
+                <div className="text-xs text-stone-500 truncate">
+                  {toast.detail}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -468,55 +1717,428 @@ function BalanceEditor({ user, busy, onApply }) {
   const [amount, setAmount] = useState("");
   return (
     <div>
-      <div className="flex items-center gap-3 mb-4"><div className="w-12 h-12 rounded-xl bg-amber-50 flex items-center justify-center text-2xl">{user.avatar}</div><div><div className="text-sm font-semibold text-stone-800">{user.name}</div><div className="text-xs text-stone-400">ยอดปัจจุบัน {Number(user.balance).toLocaleString()} ฿</div></div></div>
-      <input value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^0-9]/g, ""))} placeholder="0" inputMode="numeric" className="w-full px-4 py-3 rounded-xl border-2 border-orange-100 text-lg font-semibold outline-none focus:border-orange-300 mb-4" style={{ fontFamily: "Mitr, sans-serif" }} />
+      <div className="flex items-center gap-3 mb-4">
+        <div className="w-12 h-12 rounded-xl bg-amber-50 flex items-center justify-center text-2xl">
+          {user.avatar}
+        </div>
+        <div>
+          <div className="text-sm font-semibold text-stone-800">
+            {user.name}
+          </div>
+          <div className="text-xs text-stone-400">
+            ยอดปัจจุบัน {Number(user.balance).toLocaleString()} ฿
+          </div>
+        </div>
+      </div>
+      <input
+        value={amount}
+        onChange={(e) => setAmount(e.target.value.replace(/[^0-9]/g, ""))}
+        placeholder="0"
+        inputMode="numeric"
+        className="w-full px-4 py-3 rounded-xl border-2 border-orange-100 text-lg font-semibold outline-none focus:border-orange-300 mb-4"
+        style={{ fontFamily: "Mitr, sans-serif" }}
+      />
       <div className="grid grid-cols-2 gap-3">
-        <button disabled={busy} onClick={() => onApply(Number(amount) || 0)} className="py-3 rounded-xl bg-teal-500 text-white font-semibold text-sm flex items-center justify-center gap-1.5 disabled:opacity-60">{busy ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />} เพิ่มยอดเงิน</button>
-        <button disabled={busy} onClick={() => onApply(-(Number(amount) || 0))} className="py-3 rounded-xl bg-pink-50 border-2 border-pink-200 text-pink-600 font-semibold text-sm disabled:opacity-60">หักยอดเงิน</button>
+        <ActionButton
+          disabled={busy}
+          onClick={() => onApply(Number(amount) || 0)}
+          className="py-3 rounded-xl bg-teal-500 text-white font-semibold text-sm flex items-center justify-center gap-1.5 disabled:opacity-60"
+        >
+          {busy ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : (
+            <Plus size={15} />
+          )}{" "}
+          เพิ่มยอดเงิน
+        </ActionButton>
+        <ActionButton
+          disabled={busy}
+          onClick={() => onApply(-(Number(amount) || 0))}
+          className="py-3 rounded-xl bg-pink-50 border-2 border-pink-200 text-pink-600 font-semibold text-sm disabled:opacity-60"
+        >
+          หักยอดเงิน
+        </ActionButton>
       </div>
     </div>
   );
 }
 
 function AddBadgeModal({ busy, onClose, onAdd }) {
-  const [b, setB] = useState({ icon: "🏅", label: "", criteria: "", conditionType: "sales", threshold: 5 });
+  const [b, setB] = useState({
+    icon: "🏅",
+    label: "",
+    criteria: "",
+    conditionType: "sales",
+    threshold: 5,
+  });
   return (
     <Modal title="เพิ่มเหรียญรางวัลใหม่" onClose={onClose}>
       <div className="space-y-3">
-        <div><label className="text-xs font-semibold text-stone-500">ไอคอน (อีโมจิ)</label><input value={b.icon} onChange={(e) => setB((x) => ({ ...x, icon: e.target.value }))} className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-lg outline-none focus:border-orange-300" /></div>
-        <div><label className="text-xs font-semibold text-stone-500">ชื่อเหรียญ</label><input value={b.label} onChange={(e) => setB((x) => ({ ...x, label: e.target.value }))} className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300" /></div>
-        <div><label className="text-xs font-semibold text-stone-500">เงื่อนไข (คำอธิบาย)</label><input value={b.criteria} onChange={(e) => setB((x) => ({ ...x, criteria: e.target.value }))} className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300" /></div>
-        <div><label className="text-xs font-semibold text-stone-500">ประเภทเงื่อนไข</label><select value={b.conditionType} onChange={(e) => setB((x) => ({ ...x, conditionType: e.target.value }))} className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"><option value="sales">ยอดขาย (จำนวนครั้ง)</option><option value="spending">ยอดใช้จ่ายสะสม</option><option value="savings">ยอดออมในกระปุก</option><option value="top_daily_seller">ขายดีที่สุดประจำวัน</option></select></div>
-        <div><label className="text-xs font-semibold text-stone-500">เกณฑ์ขั้นต่ำ</label><input value={b.threshold} onChange={(e) => setB((x) => ({ ...x, threshold: Number(e.target.value.replace(/[^0-9]/g, "")) || 0 }))} inputMode="numeric" className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300" /></div>
-        <button disabled={busy} onClick={() => b.label.trim() && onAdd(b)} className="w-full mt-2 py-3 rounded-xl bg-orange-500 text-white font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-60">{busy && <Loader2 size={16} className="animate-spin" />} บันทึกเหรียญ</button>
+        <div>
+          <label className="text-xs font-semibold text-stone-500">
+            ไอคอน (อีโมจิ)
+          </label>
+          <input
+            value={b.icon}
+            onChange={(e) => setB((x) => ({ ...x, icon: e.target.value }))}
+            className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-lg outline-none focus:border-orange-300"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-stone-500">
+            ชื่อเหรียญ
+          </label>
+          <input
+            value={b.label}
+            onChange={(e) => setB((x) => ({ ...x, label: e.target.value }))}
+            className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-stone-500">
+            เงื่อนไข (คำอธิบาย)
+          </label>
+          <input
+            value={b.criteria}
+            onChange={(e) => setB((x) => ({ ...x, criteria: e.target.value }))}
+            className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-stone-500">
+            ประเภทเงื่อนไข
+          </label>
+          <select
+            value={b.conditionType}
+            onChange={(e) =>
+              setB((x) => ({ ...x, conditionType: e.target.value }))
+            }
+            className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"
+          >
+            <option value="sales">ยอดขาย (จำนวนครั้ง)</option>
+            <option value="spending">ยอดใช้จ่ายสะสม</option>
+            <option value="savings">ยอดออมในกระปุก</option>
+            <option value="top_daily_seller">ขายดีที่สุดประจำวัน</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-stone-500">
+            เกณฑ์ขั้นต่ำ
+          </label>
+          <input
+            value={b.threshold}
+            onChange={(e) =>
+              setB((x) => ({
+                ...x,
+                threshold: Number(e.target.value.replace(/[^0-9]/g, "")) || 0,
+              }))
+            }
+            inputMode="numeric"
+            className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"
+          />
+        </div>
+        <ActionButton
+          disabled={busy}
+          onClick={() => b.label.trim() && onAdd(b)}
+          className="w-full mt-2 py-3 rounded-xl bg-orange-500 text-white font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-60"
+        >
+          {busy && <Loader2 size={16} className="animate-spin" />} บันทึกเหรียญ
+        </ActionButton>
       </div>
     </Modal>
   );
 }
 
 function CreateAccountModal({ busy, onClose, onCreate, existingAccounts }) {
-  const [form, setForm] = useState({ fullName: "", idCard: "", shopName: "", account: "", password: "" });
+  const [form, setForm] = useState({
+    fullName: "",
+    idCard: "",
+    shopName: "",
+    account: "",
+    password: "",
+  });
   const [error, setError] = useState("");
   const submit = async () => {
-    if (!form.fullName || !form.shopName || !form.password) return setError("กรุณากรอกข้อมูลให้ครบ");
-    if (form.idCard.length !== 13) return setError("เลขบัตรประชาชนจำลองต้องมี 13 หลัก");
+    if (!form.fullName || !form.shopName || !form.password)
+      return setError("กรุณากรอกข้อมูลให้ครบ");
+    if (form.idCard.length !== 13)
+      return setError("เลขบัตรประชาชนจำลองต้องมี 13 หลัก");
     if (form.account.length !== 6) return setError("เลขบัญชีต้องมี 6 หลัก");
-    if (existingAccounts.includes(form.account)) return setError("เลขบัญชีนี้ถูกใช้แล้ว");
+    if (existingAccounts.map(String).includes(form.account))
+      return setError("เลขบัญชีนี้ถูกใช้แล้ว");
     setError("");
     const res = await onCreate(form);
     if (res?.ok) onClose();
+    else setError(res?.error || "สร้างบัญชีไม่สำเร็จ");
   };
   return (
     <Modal title="สร้างบัญชีใหม่" onClose={onClose}>
       <div className="space-y-3">
-        <div><label className="text-xs font-semibold text-stone-500">ชื่อ-นามสกุลเจ้าของบัญชี</label><input value={form.fullName} onChange={(e) => setForm((f) => ({ ...f, fullName: e.target.value }))} className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300" /></div>
-        <div><label className="text-xs font-semibold text-stone-500">เลขบัตรประชาชนจำลอง (13 หลัก)</label><input value={form.idCard} onChange={(e) => setForm((f) => ({ ...f, idCard: e.target.value.replace(/[^0-9]/g, "").slice(0, 13) }))} inputMode="numeric" className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300" /></div>
-        <div><label className="text-xs font-semibold text-stone-500">ชื่อร้าน / ชื่อเล่น</label><input value={form.shopName} onChange={(e) => setForm((f) => ({ ...f, shopName: e.target.value }))} className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300" /></div>
-        <div><label className="text-xs font-semibold text-stone-500">เลขบัญชี (6 หลัก)</label><input value={form.account} onChange={(e) => setForm((f) => ({ ...f, account: e.target.value.replace(/[^0-9]/g, "").slice(0, 6) }))} inputMode="numeric" className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300" /></div>
-        <div><label className="text-xs font-semibold text-stone-500">รหัสผ่านเริ่มต้น</label><input value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300" /></div>
-        {error && <div className="text-xs text-pink-500 font-medium">{error}</div>}
-        <button disabled={busy} onClick={submit} className="w-full mt-2 py-3 rounded-xl bg-orange-500 text-white font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-60">{busy && <Loader2 size={16} className="animate-spin" />} สร้างบัญชี</button>
+        <div>
+          <label className="text-xs font-semibold text-stone-500">
+            ชื่อ-นามสกุลเจ้าของบัญชี
+          </label>
+          <input
+            value={form.fullName}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, fullName: e.target.value }))
+            }
+            className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-stone-500">
+            เลขบัตรประชาชนจำลอง (13 หลัก)
+          </label>
+          <input
+            value={form.idCard}
+            onChange={(e) =>
+              setForm((f) => ({
+                ...f,
+                idCard: e.target.value.replace(/[^0-9]/g, "").slice(0, 13),
+              }))
+            }
+            inputMode="numeric"
+            className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-stone-500">
+            ชื่อร้าน / ชื่อเล่น
+          </label>
+          <input
+            value={form.shopName}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, shopName: e.target.value }))
+            }
+            className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-stone-500">
+            เลขบัญชี (6 หลัก)
+          </label>
+          <input
+            value={form.account}
+            onChange={(e) =>
+              setForm((f) => ({
+                ...f,
+                account: e.target.value.replace(/[^0-9]/g, "").slice(0, 6),
+              }))
+            }
+            inputMode="numeric"
+            className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-stone-500">
+            รหัสผ่านเริ่มต้น
+          </label>
+          <input
+            value={form.password}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, password: e.target.value }))
+            }
+            className="w-full mt-1 px-4 py-3 rounded-xl border-2 border-orange-100 text-sm outline-none focus:border-orange-300"
+          />
+        </div>
+        {error && (
+          <div className="text-xs text-pink-500 font-medium">{error}</div>
+        )}
+        <ActionButton
+          disabled={busy}
+          onClick={submit}
+          className="w-full mt-2 py-3 rounded-xl bg-orange-500 text-white font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-60"
+        >
+          {busy && <Loader2 size={16} className="animate-spin" />} สร้างบัญชี
+        </ActionButton>
       </div>
     </Modal>
+  );
+}
+
+function StatCard({ label, value, icon: Icon, tone }) {
+  const tones = {
+    orange: "bg-orange-50 text-orange-700 border-orange-200",
+    pink: "bg-pink-50 text-pink-700 border-pink-200",
+    teal: "bg-teal-50 text-teal-700 border-teal-200",
+    amber: "bg-amber-50 text-amber-700 border-amber-200",
+  };
+  return (
+    <div className={`rounded-2xl border-2 p-4 ${tones[tone]}`}>
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium opacity-80">{label}</span>
+        <Icon size={18} />
+      </div>
+      <div
+        className="mt-2 font-semibold text-2xl"
+        style={{ fontFamily: "Mitr, sans-serif" }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function Modal(props) {
+  return <Sheet {...props} />;
+}
+function VisaCard({ user }) {
+  const [printError, setPrintError] = useState("");
+  const version = Math.max(1, number(user.qrVersion));
+  const payload = JSON.stringify({
+    action: "jiwpay_card",
+    account: String(user.account),
+    cardType: user.hasCreditCard ? "visa" : "wallet",
+    qrVersion: version,
+  });
+  return (
+    <details className="jp-card overflow-hidden mt-4">
+      <summary className="cursor-pointer p-4 flex items-center gap-2 text-sm font-semibold">
+        <CreditCard size={18} className="text-orange-500" />
+        {user.hasCreditCard
+          ? "บัตร Visa / QR สำหรับให้ร้านค้าสแกน"
+          : "บัตร JiwPay / QR สำหรับให้ร้านค้าสแกน"}
+        <span className="ml-auto text-stone-400">⌄</span>
+      </summary>
+      <div className="px-4 pb-5">
+        <div className="rounded-3xl bg-gradient-to-br from-stone-800 via-stone-700 to-amber-900 text-white p-5 shadow-lg">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold inline-flex items-center gap-2">
+              <LogoMark /> JiwPay
+            </span>
+            <span className="text-2xl font-bold italic">
+              {user.hasCreditCard ? "VISA" : "JIWPAY"}
+            </span>
+          </div>
+          <p className="text-[11px] text-amber-200 mt-2">บัตรภายในเกม JiwPay</p>
+          <div className="bg-white rounded-2xl p-3 w-fit mx-auto mt-5">
+            {user.qrEnabled ? (
+              <CardQr payload={payload} />
+            ) : (
+              <div className="w-40 h-40 flex items-center justify-center text-stone-500 text-sm">
+                บัตรถูกระงับ
+              </div>
+            )}
+          </div>
+          <div className="flex items-end justify-between mt-5">
+            <div>
+              <p className="text-xs opacity-70">{user.name}</p>
+              <p className="font-mono tracking-widest mt-1">
+                {fmtAccount(user.account)}
+              </p>
+            </div>
+            <span className="text-xs text-amber-200">บัตรรุ่น {version}</span>
+          </div>
+        </div>
+        {user.qrEnabled && (
+          <ActionButton
+            className="jp-primary w-full mt-4"
+            onClick={async () => {
+              setPrintError("");
+              try {
+                await printCardQr(user, payload, version);
+              } catch (error) {
+                setPrintError(error.message);
+              }
+            }}
+          >
+            พิมพ์ QR ติดบัตร
+          </ActionButton>
+        )}
+        {printError && (
+          <p role="alert" className="text-sm text-red-600 mt-2">
+            {printError}
+          </p>
+        )}
+        <p className="text-xs text-stone-500 mt-4 leading-relaxed">
+          ให้ร้านค้าสแกน QR นี้เพื่อรับชำระจากบัญชีนี้ เลือกจ่ายเต็มหรือผ่อน 0%
+          ได้ที่หน้าร้านค้า
+        </p>
+      </div>
+    </details>
+  );
+}
+function CardQr({ payload }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [payload]);
+  return failed ? (
+    <ActionButton
+      className="jp-secondary w-40 h-40 text-xs"
+      onClick={() => setFailed(false)}
+    >
+      โหลด QR อีกครั้ง
+    </ActionButton>
+  ) : (
+    <img
+      src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(payload)}`}
+      width={160}
+      height={160}
+      alt="QR บัตร Visa สำหรับร้านค้าสแกนตัดเงิน"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+// A separate print document keeps account management controls off the sticker.
+function printCardQr(user, payload, version) {
+  const popup = window.open("", "_blank", "width=600,height=700");
+  if (!popup)
+    return Promise.reject(
+      new Error("กรุณาอนุญาตป๊อปอัปเพื่อเปิดหน้าพิมพ์บัตร"),
+    );
+  popup.opener = null;
+  const doc = popup.document;
+  doc.title = "JiwPay · QR ติดบัตร";
+  const style = doc.createElement("style");
+  style.textContent = `*{box-sizing:border-box}body{margin:0;padding:24px;font:14px sans-serif;text-align:center;color:#111;background:#fff8f0}article{width:2in;height:3in;padding:.12in;margin:0 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.08in;background:white;border:1px solid #d9bba6;border-radius:.12in;break-inside:avoid;overflow:hidden}img{width:1.65in;height:1.65in;display:block;flex-shrink:0}h1{font-size:15px;margin:0}p{font-size:10px;line-height:1.4;margin:0;overflow-wrap:anywhere;max-width:100%}button{padding:12px;margin:16px}.print-help{font-size:12px;color:#715643;margin:16px auto;max-width:340px}@media print{@page{size:auto;margin:10mm}body{padding:0;background:white}button,.print-help{display:none}article{margin:0;width:2in;height:3in;print-color-adjust:exact;-webkit-print-color-adjust:exact}}`;
+  doc.head.append(style);
+  const card = doc.createElement("article");
+  const title = doc.createElement("h1");
+  title.textContent = user.hasCreditCard ? "JiwPay · VISA" : "JiwPay";
+  const img = doc.createElement("img");
+  img.alt = "QR สำหรับร้านค้าสแกนรับชำระ";
+  const label = doc.createElement("p");
+  label.textContent = `${user.name} · ${user.account} · v${version}`;
+  const hint = doc.createElement("p");
+  hint.textContent = "สแกนเพื่อรับชำระ • บัตรภายในเกม";
+  card.append(title, img, label, hint);
+  const button = doc.createElement("button");
+  button.textContent = "กำลังเตรียม QR…";
+  button.disabled = true;
+  button.onclick = () => popup.print();
+  const instructions = doc.createElement("p");
+  instructions.className = "print-help";
+  instructions.textContent =
+    "บัตรแนวตั้ง กว้าง 2 × สูง 3 นิ้ว (50.8 × 76.2 มม.) เลือกขนาดจริง / 100% และปิดหัวกระดาษ–ท้ายกระดาษก่อนพิมพ์ ตัดตามขอบบัตร";
+  doc.body.replaceChildren(card, instructions, button);
+  return new Promise((resolve, reject) => {
+    const fail = () => {
+      clearTimeout(timer);
+      button.textContent = "โหลด QR ไม่สำเร็จ กรุณาปิดแล้วลองใหม่";
+      reject(new Error("โหลด QR สำหรับพิมพ์ไม่สำเร็จ กรุณาลองใหม่"));
+    };
+    const timer = setTimeout(fail, 20000);
+    img.onerror = fail;
+    img.onload = () => {
+      clearTimeout(timer);
+      button.disabled = false;
+      button.textContent = "พิมพ์บัตร 2 × 3 นิ้ว (100%)";
+      resolve();
+    };
+    img.src = `https://api.qrserver.com/v1/create-qr-code/?size=800x800&margin=40&ecc=M&data=${encodeURIComponent(payload)}`;
+  });
+}
+
+function LogoMark({
+  className = "inline-block w-8 h-8 object-contain align-middle shrink-0",
+}) {
+  return (
+    <img
+      src="./jiwpay-logo-transparent.png"
+      alt=""
+      aria-hidden="true"
+      className={className}
+    />
   );
 }
