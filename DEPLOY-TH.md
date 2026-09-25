@@ -1,3 +1,30 @@
+# อัปเดตรุ่นบัตรแนวนอนและเวลาเกม
+
+ต้องอัปเดตทั้งเว็บและ Apps Script รอบนี้
+
+1. แตก JiwPay-ready-to-upload.zip เปิดโฟลเดอร์ด้านใน จะเห็น index.html และ assets
+2. Cloudflare → bank-jiwpay → New deployment → Upload static files เลือกโฟลเดอร์ด้านในนี้ แล้ว Deploy ไม่เลือก source ที่มี package.json หรือ wrangler.jsonc
+3. อัปเดต backend/Code.gs ใส่ ADMIN_KEY เดิม เรียก installGameClock หนึ่งครั้ง แล้ว Deploy Apps Script เวอร์ชันใหม่ตาม backend/GAME_CLOCK_SETUP_TH.md
+4. เปิดแอดมิน → เวลาเกม เลือกความเร็วและเริ่มนาฬิกา จบกิจกรรมกดหยุดเกม
+
+การอัปโหลด static ไม่แก้ source ใน GitHub หากกลับไป build ผ่าน GitHub ให้ใช้ source ชุดใหม่ด้วย
+
+# แก้ Cloudflare Workers bank-jiwpay
+
+จากภาพวันที่ 24 กันยายน: Cloudflare ใช้ pnpm 10.11.1 และหยุดด้วย ERROR packages field missing or empty
+
+แตก JiwPay-Cloudflare-fix.zip แล้วอัปโหลด 2 ไฟล์ด้านในที่หน้าแรก repository (ระดับเดียวกับ package.json):
+- pnpm-workspace.yaml: แก้ packages และอนุญาต esbuild สำหรับ pnpm 10
+- wrangler.jsonc: กำหนด Worker bank-jiwpay ให้เผยแพร่ไฟล์จาก dist
+
+ใช้ Build command: npm run build, Deploy command: npx wrangler deploy, Root directory: / ตามภาพเดิม
+หลัง Commit ให้ Cloudflare สร้าง deployment จาก commit ล่าสุด ไม่ใช่ retry commit เก่าก่อนแก้
+ยังไม่ได้เผยแพร่ระบบจริงจากเครื่องนี้
+
+อ้างอิง https://developers.cloudflare.com/workers/static-assets/get-started/
+
+---
+
 # อัปเดต JiwPay ผ่านหน้าเว็บ GitHub
 
 ชุด JiwPay-GitHub-upload.zip มีเฉพาะ frontend พร้อมอัปโหลด แตก ZIP ก่อน ไม่อัปโหลด ZIP ทั้งก้อน
@@ -31,7 +58,7 @@ URL Apps Script ที่ส่งมาใส่ไว้ใน frontend แล
 
 อัปเดต GitHub ไม่ได้อัปเดต Apps Script
 ถ้ายังไม่ได้อัปเดต Code.gs ที่รวมการตรวจรุ่น QR ให้เปิด backend/Code.gs ในชุดเต็ม ใส่ ADMIN_KEY เดิม แล้ววางแทนโค้ดเดิม บันทึกและ Deploy → Manage deployments → Edit → New version → Deploy ใช้ URL เดิม
-ถ้าอัปเดตแล้ว การปรับสแกน/POS รอบนี้ไม่ต้อง deploy GAS ซ้ำ
+รุ่นเวลาเกมนี้ต้อง deploy GAS ใหม่ แม้เคยอัปเดต QR แล้ว และเรียก installGameClock ตามคู่มือ
 
 ## ตรวจหลังอัปเดต
 
