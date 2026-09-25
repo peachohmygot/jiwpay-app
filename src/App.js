@@ -164,7 +164,7 @@ function normalizeUser(user) {
     safe[key] = number(safe[key]);
   for (const key of ["favoriteAccounts", "earnedBadges", "creditSchedules"])
     safe[key] = Array.isArray(safe[key]) ? safe[key] : [];
-  for (const key of ["negative", "qrEnabled", "hasCreditCard"])
+  for (const key of ["negative", "qrEnabled", "hasCreditCard", "accountPaused"])
     safe[key] =
       safe[key] === true || String(safe[key]).toLowerCase() === "true";
   return { ...safe, account: String(safe.account), loan: safe.loan || null };
@@ -818,6 +818,12 @@ function ClientSession({ account, onAccount }) {
       return { ok: false, error: "กำลังบันทึกรายการก่อนหน้า" };
     if (!ref.current.currentUser)
       return { ok: false, error: "กรุณารอข้อมูลบัญชี" };
+    const current = ref.current.currentUser;
+    const spending =
+      (body.type === "transfer" && String(body.fromAccount) === account) ||
+      ["piggy_deposit", "piggy_withdraw", "loan_request"].includes(body.type);
+    if (spending && (current.accountPaused || current.balance < 0))
+      return { ok: false, error: "บัญชีพักการจ่ายออก กรุณาติดต่อแอดมิน" };
     writing.current = true;
     generation.current++;
     setPendingAction(label);
@@ -1123,6 +1129,12 @@ function ClientSession({ account, onAccount }) {
               <GameClock state={gameTime} />
             </div>
             <Notice>{syncError}</Notice>
+            {(currentUser?.accountPaused || currentUser?.balance < 0) && (
+              <Notice>
+                บัญชีพักการจ่ายออก ติดต่อแอดมินเพื่อชำระยอดและปลดพัก
+                ยังรับเงินเข้าได้
+              </Notice>
+            )}
             {pendingAction && (
               <div
                 role="status"
@@ -1267,6 +1279,23 @@ function WalletApp({
   onFavorite,
 }) {
   const [page, setPage] = useState("home");
+  const [tapCard, setTapCard] = useState(null);
+  useEffect(() => {
+    const openTap = () => {
+      const card = parseTapCard(window.location.hash);
+      if (!card) return;
+      setTapCard({ ...card, instance: newId() });
+      setPage("tap");
+      window.history.replaceState(
+        null,
+        "",
+        window.location.pathname + window.location.search,
+      );
+    };
+    openTap();
+    window.addEventListener("hashchange", openTap);
+    return () => window.removeEventListener("hashchange", openTap);
+  }, []);
   const [scannedRecipient, setScannedRecipient] = useState(null);
   const [modal, setModal] = useState(null);
   const [receipt, setReceipt] = useState(null);
@@ -1293,6 +1322,7 @@ function WalletApp({
       />
     );
   const titles = {
+    tap: "รับชำระจากบัตร NFC",
     transfer: "โอนเงิน",
     scanpay: "สแกน QR เพื่อจ่ายเงิน",
     scan: "สแกน",
@@ -1347,14 +1377,29 @@ function WalletApp({
               onOpenPiggy={() => setModal("savings")}
               onOpenPayBill={() => setModal("credit")}
               onReceive={() => setModal("receive")}
-              onCard={() => setModal("card")}
               onLock={onLock}
             />
+          )}
+          {page === "tap" && tapCard && (
+            <div className="px-5">
+              <TapCardPayment
+                key={tapCard.instance}
+                card={tapCard}
+                user={user}
+                lookup={lookup}
+                onCash={celebrate(onCash)}
+                onCredit={celebrate(onCredit)}
+              />
+            </div>
           )}
           {page === "scan" && (
             <ScanHub
               user={user}
               lookup={lookup}
+              onTransfer={() => {
+                setScannedRecipient(null);
+                setPage("transfer");
+              }}
               onCash={celebrate(onCash)}
               onCredit={celebrate(onCredit)}
               onChoose={(recipient) => {
@@ -1394,6 +1439,7 @@ function WalletApp({
           )}
           {page === "pos" && (
             <div className="px-5">
+              <NfcReceiveGuide />
               <PosQrPanel user={user} />
             </div>
           )}
@@ -1467,7 +1513,6 @@ function WalletApp({
               savings: "กระปุกออมสิน",
               credit: "บัตรเครดิต JiwPay",
               receive: "QR รับโอนของฉัน",
-              card: "บัตร / QR ของฉัน",
             }[modal]
           }
           busy={busy}
@@ -1485,7 +1530,6 @@ function WalletApp({
               <CreditBill user={user} onPay={celebrate(onBill)} />
             )}
             {modal === "receive" && <ReceiveQR user={user} />}
-            {modal === "card" && <VisaCard user={user} />}
           </fieldset>
         </Sheet>
       )}
@@ -1515,7 +1559,8 @@ function TransactionList({ transactions, account }) {
               </span>
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium truncate">
-                  {tx.memo ||
+                  {transactionParty(tx, account) ||
+                    tx.memo ||
                     {
                       TRANSFER: "โอนเงิน",
                       CREDIT_PURCHASE: "ชำระด้วยเครดิต",
@@ -1528,7 +1573,7 @@ function TransactionList({ transactions, account }) {
                     tx.type}
                 </p>
                 <p className="text-[11px] text-[#b19887] mt-1">
-                  วันที่ {tx.day || "—"} · {tx.time || "JiwPay"}
+                  วันที่ {tx.day || "—"} · {formatTransactionTime(tx.time)}
                 </p>
               </div>
               <p
@@ -1981,7 +2026,6 @@ function CreditBill({ user, onPay }) {
     total = creditTotalOutstanding(user);
   return (
     <div className="space-y-4">
-      <VisaCard user={user} />
       <PaymentRules />
       <div className="rounded-3xl bg-[#594034] text-white p-6">
         <p className="text-xs opacity-60">ยอดค้างชำระทั้งหมด</p>
@@ -2088,8 +2132,15 @@ function decodeScanPayload(raw) {
   return { account: /^\d{6}$/.test(raw) ? raw : "", amount: "" };
 }
 function ScannerPanel({ lookup, onChoose, mode = "pay" }) {
-  const [manual, setManual] = useState(""),
-    [error, setError] = useState("");
+  const [error, setError] = useState("");
+  const active = useRef(true);
+  const reading = useRef(false);
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
+  }, []);
   const detect = async (raw) => {
     const decoded = decodeScanPayload(raw);
     if (!decoded.account) {
@@ -2102,7 +2153,22 @@ function ScannerPanel({ lookup, onChoose, mode = "pay" }) {
       );
       return;
     }
-    const found = await lookup(decoded.account, true);
+    if (
+      mode === "collect" &&
+      (decoded.action !== "jiwpay_card" || !decoded.qrVersion)
+    ) {
+      setError("กรุณาสแกน QR บนบัตรที่แอดมินออกให้");
+      return;
+    }
+    if (reading.current) return;
+    reading.current = true;
+    let found;
+    try {
+      found = await lookup(decoded.account);
+    } finally {
+      reading.current = false;
+    }
+    if (!active.current) return;
     if (!found) {
       setError("ไม่พบบัญชี กรุณาลองอีกครั้ง");
       return;
@@ -2114,8 +2180,11 @@ function ScannerPanel({ lookup, onChoose, mode = "pay" }) {
       setError("บัญชีนี้ถูกระงับการใช้ QR");
       return;
     }
-    if (mode === "collect" && decoded.action === "pay") {
-      setError("นี่คือ QR รับโอนเงิน ให้ลูกค้าเปิด QR บัตร Visa แทน");
+    if (
+      mode === "collect" &&
+      (decoded.action !== "jiwpay_card" || !decoded.qrVersion)
+    ) {
+      setError("กรุณาสแกน QR บนบัตรที่แอดมินออกให้");
       return;
     }
     if (
@@ -2149,30 +2218,18 @@ function ScannerPanel({ lookup, onChoose, mode = "pay" }) {
           </span>
         </p>
       </div>
+      <details className="text-xs text-stone-500 rounded-xl bg-white p-3">
+        <summary className="cursor-pointer">ตั้งค่าให้จำสิทธิ์กล้อง</summary>
+        <p className="mt-2">Safari: เปิดเมนูของเว็บไซต์ → การตั้งค่าเว็บไซต์ → กล้อง → อนุญาต แทนถามทุกครั้ง</p>
+        <p className="mt-2">Android: เปิดการตั้งค่าสิทธิ์ของเว็บไซต์ในเบราว์เซอร์ แล้วอนุญาตกล้อง หากเปิดผ่าน LINE แล้วถามซ้ำ ให้เปิดลิงก์ใน Safari หรือ Chrome</p>
+        <p className="mt-2">เบราว์เซอร์เป็นผู้จำสิทธิ์ แอปไม่สามารถบังคับอนุญาตถาวรได้ และจะปิดกล้องเมื่อออกจากหน้าสแกน</p>
+      </details>
       <Notice>{error}</Notice>
-      <div className="jp-card p-5">
-        <Field
-          label="หรือกรอกเลขบัญชี"
-          value={manual}
-          onChange={(e) =>
-            setManual(e.target.value.replace(/\D/g, "").slice(0, 6))
-          }
-          inputMode="numeric"
-          placeholder="เลขบัญชี 6 หลัก"
-        />
-        <ActionButton
-          disabled={manual.length !== 6}
-          className="jp-secondary w-full mt-3"
-          onClick={() => detect(manual)}
-        >
-          ค้นหาบัญชี <ArrowRight size={15} />
-        </ActionButton>
-      </div>
     </div>
   );
 }
-function PosPanel({ lookup, onCash, onCredit, user }) {
-  const [customer, setCustomer] = useState(null);
+function PosPanel({ lookup, onCash, onCredit, user, initialCustomer = null }) {
+  const [customer, setCustomer] = useState(initialCustomer);
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("cash");
   const [days, setDays] = useState("3");
@@ -2334,6 +2391,23 @@ function PosPanel({ lookup, onCash, onCredit, user }) {
       <Notice>{error}</Notice>
     </div>
   );
+}
+
+function NfcReceiveGuide() {
+  const [open, setOpen] = useState(false);
+  return <section className="jp-card p-4 mb-4">
+    <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className="w-full flex justify-between items-center text-sm font-semibold text-orange-700 py-2">
+      <span>รับชำระด้วยบัตร NFC</span><span aria-hidden="true">{open ? "−" : "+"}</span>
+    </button>
+    {open && <div className="space-y-2 text-sm text-stone-600 pt-3">
+      <p className="font-semibold text-stone-800">แตะบัตรกับโทรศัพท์ร้านค้า</p>
+      <p>บัตรต้องบันทึกลิงก์ NFC จากแอดมินแล้ว ปิดกล้องและเปิดหน้าจอโทรศัพท์ไว้</p>
+      <p>iPhone: แตะบัตรใกล้ด้านบนเครื่อง แล้วแตะการแจ้งเตือนเพื่อเปิด JiwPay</p>
+      <p>Android: เปิด NFC แล้วแตะบัตรบริเวณตัวอ่านของเครื่อง</p>
+      <p>เมื่อเปิดข้อมูลลูกค้าแล้ว ใส่ยอด เลือกจ่ายเต็มหรือผ่อน และยืนยันรับชำระ</p>
+      <p className="text-xs text-orange-700">หน้านี้เป็นคำแนะนำ โทรศัพท์เป็นตัวอ่านบัตร ไม่ได้เปิดเครื่องอ่าน NFC ในเว็บ และยังไม่หักเงินจนกดยืนยัน</p>
+    </div>}
+  </section>;
 }
 
 function PosQrPanel({ user }) {
@@ -2533,6 +2607,11 @@ function CameraPreview({ accent, onDetect, fallbackText }) {
         return;
       }
       try {
+        // Decode module and camera permission load concurrently.
+        const decoderReady = loadQrDecoder().then(
+          (value) => ({ value }),
+          (error) => ({ error }),
+        );
         try {
           stream = await navigator.mediaDevices.getUserMedia({
             audio: false,
@@ -2556,7 +2635,9 @@ function CameraPreview({ accent, onDetect, fallbackText }) {
         video.muted = true;
         video.setAttribute("webkit-playsinline", "true");
         await video.play();
-        decode = await loadQrDecoder();
+        const decoderResult = await decoderReady;
+        if (decoderResult.error) throw decoderResult.error;
+        decode = decoderResult.value;
         if (cancelled || document.hidden) {
           stop();
           return;
@@ -2570,7 +2651,8 @@ function CameraPreview({ accent, onDetect, fallbackText }) {
           setStatus(error.name === "NotAllowedError" ? "denied" : "failed");
       }
     };
-    start();
+    // Defer one task so StrictMode cleanup cancels its first permission request.
+    const startTimer = setTimeout(start, 0);
     const visibility = () => {
       if (document.hidden) stop();
       else setAttempt((value) => value + 1);
@@ -2578,6 +2660,7 @@ function CameraPreview({ accent, onDetect, fallbackText }) {
     document.addEventListener("visibilitychange", visibility);
     return () => {
       cancelled = true;
+      clearTimeout(startTimer);
       stop();
       video.srcObject = null;
       document.removeEventListener("visibilitychange", visibility);
@@ -2601,7 +2684,9 @@ function CameraPreview({ accent, onDetect, fallbackText }) {
       />
       {live ? (
         <div className="absolute bottom-2 inset-x-2 z-20 bg-black/50 text-white text-[11px] text-center rounded-lg py-1.5">
-          {status === "processing" ? "กำลังตรวจสอบ QR..." : "กำลังสแกน..."}
+          {status === "processing"
+            ? "อ่าน QR แล้ว · กำลังค้นหาบัญชี..."
+            : "กำลังสแกน..."}
         </div>
       ) : (
         <div className="absolute inset-0 z-20 bg-stone-900/90 flex flex-col items-center justify-center gap-2 px-3 text-center text-stone-200 text-[11px]">
@@ -2633,61 +2718,6 @@ function CameraPreview({ accent, onDetect, fallbackText }) {
 
 export { CameraPreview, SmartQrImage, normalizeGame, normalizeUser };
 
-function VisaCard({ user }) {
-  const version = Math.max(1, number(user.qrVersion));
-  const payload = JSON.stringify({
-    action: "jiwpay_card",
-    account: String(user.account),
-    cardType: user.hasCreditCard ? "visa" : "wallet",
-    qrVersion: version,
-  });
-  return (
-    <details className="jp-card overflow-hidden mt-4">
-      <summary className="cursor-pointer p-4 flex items-center gap-2 text-sm font-semibold">
-        <CreditCard size={18} className="text-orange-500" />
-        {user.hasCreditCard
-          ? "บัตร Visa / QR สำหรับให้ร้านค้าสแกน"
-          : "บัตร JiwPay / QR สำหรับให้ร้านค้าสแกน"}
-        <span className="ml-auto text-stone-400">⌄</span>
-      </summary>
-      <div className="px-4 pb-5">
-        <div className="rounded-3xl bg-gradient-to-br from-stone-800 via-stone-700 to-amber-900 text-white p-5 shadow-lg">
-          <div className="flex items-center justify-between">
-            <span className="font-semibold inline-flex items-center gap-2">
-              <LogoMark /> JiwPay
-            </span>
-            <span className="text-2xl font-bold italic">
-              {user.hasCreditCard ? "VISA" : "JIWPAY"}
-            </span>
-          </div>
-          <p className="text-[11px] text-amber-200 mt-2">บัตรภายในเกม JiwPay</p>
-          <div className="bg-white rounded-2xl p-3 w-fit mx-auto mt-5">
-            {user.qrEnabled ? (
-              <CardQr payload={payload} />
-            ) : (
-              <div className="w-40 h-40 flex items-center justify-center text-stone-500 text-sm">
-                บัตรถูกระงับ
-              </div>
-            )}
-          </div>
-          <div className="flex items-end justify-between mt-5">
-            <div>
-              <p className="text-xs opacity-70">{user.name}</p>
-              <p className="font-mono tracking-widest mt-1">
-                {fmtAccount(user.account)}
-              </p>
-            </div>
-            <span className="text-xs text-amber-200">บัตรรุ่น {version}</span>
-          </div>
-        </div>
-        <p className="text-xs text-stone-500 mt-4 leading-relaxed">
-          ให้ร้านค้าสแกน QR นี้เพื่อรับชำระจากบัญชีนี้ เลือกจ่ายเต็มหรือผ่อน 0%
-          ได้ที่หน้าร้านค้า
-        </p>
-      </div>
-    </details>
-  );
-}
 function CardQr({ payload }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [payload]);
@@ -2724,9 +2754,9 @@ function HomeView({
   onOpenPiggy,
   onOpenPayBill,
   onReceive,
-  onCard,
   onLock,
 }) {
+  const hasVisa = user.hasCreditCard || user.creditSchedules.length > 0;
   const { base, next } = milestoneRange(user.piggy || 0);
   const progress = Math.min(
     100,
@@ -2789,15 +2819,13 @@ function HomeView({
             touchStartX.current = e.touches[0].clientX;
           }}
           onTouchEnd={(e) => {
-            if (touchStartX.current === null || !user.hasCreditCard) return;
+            if (touchStartX.current === null || !hasVisa) return;
             const dx = e.changedTouches[0].clientX - touchStartX.current;
             if (dx < -40) setCardIndex(1);
             else if (dx > 40) setCardIndex(0);
             touchStartX.current = null;
           }}
-          onClick={() =>
-            user.hasCreditCard && setCardIndex((i) => (i === 0 ? 1 : 0))
-          }
+          onClick={() => hasVisa && setCardIndex((i) => (i === 0 ? 1 : 0))}
         >
           <div
             className="flex transition-transform duration-300"
@@ -2844,7 +2872,7 @@ function HomeView({
                 เป้าหมายถัดไป {next.toLocaleString()} ฿
               </div>
             </div>
-            {user.hasCreditCard && (
+            {hasVisa && (
               <div
                 className="w-full shrink-0 rounded-2xl p-5 text-white"
                 style={{
@@ -2876,68 +2904,44 @@ function HomeView({
                   <span>
                     วงเงินทั้งหมด {(user.creditLimit || 0).toLocaleString()} ฿
                   </span>
-                  <span>ยอดวันนี้ {todayDue.toLocaleString()} ฿</span>
+                  <span>งวดถัดไป {todayDue.toLocaleString()} ฿</span>
                 </div>
                 <ActionButton
                   onClick={(e) => {
                     e.stopPropagation();
                     onOpenPayBill();
                   }}
-                  disabled={totalOwed <= 0}
                   className="w-full mt-4 py-2.5 rounded-full bg-amber-400 text-stone-900 text-sm font-bold disabled:opacity-40"
                   style={{ fontFamily: "Mitr, sans-serif" }}
                 >
-                  ชำระบิล
+                  ดูบิล / ชำระบัตร
                 </ActionButton>
               </div>
             )}
           </div>
         </div>
-        {user.hasCreditCard && (
+        {hasVisa && (
           <p className="text-center text-[10px] text-orange-400 mt-2">
             👆 ปัดหรือแตะเพื่อสลับบัตรกระเป๋า / Visa
           </p>
         )}
-        {user.hasCreditCard && (
+        {hasVisa && (
           <div className="flex justify-center gap-1.5 mt-2">
             {[0, 1].map((i) => (
               <ActionButton
                 key={i}
                 aria-label={i === 0 ? "แสดงบัตรกระเป๋าเงิน" : "แสดงบัตร Visa"}
+                aria-pressed={cardIndex === i}
                 onClick={() => setCardIndex(i)}
-                className={`h-1.5 rounded-full transition-all ${cardIndex === i ? "w-5 bg-orange-500" : "w-1.5 bg-orange-200"}`}
-              />
+                className="h-8 min-w-8 flex items-center justify-center rounded-full focus-visible:ring-2 focus-visible:ring-orange-400"
+              >
+                <span aria-hidden="true" className={`block h-1.5 rounded-full transition-all ${cardIndex === i ? "w-6 bg-orange-500" : "w-1.5 bg-orange-200"}`} />
+              </ActionButton>
             ))}
           </div>
         )}
       </div>
 
-      {(user.hasCreditCard || user.creditSchedules.length > 0) && (
-        <div className="mt-4 rounded-2xl bg-stone-800 text-white p-4 border-2 border-amber-300">
-          <div className="flex justify-between">
-            <h2 className="font-semibold">บัตร JiwPay Visa</h2>
-            <span className="font-bold italic text-amber-300">VISA</span>
-          </div>
-          <p className="text-xs text-stone-300 mt-2">
-            วงเงินคงเหลือ ฿{money(user.availableCredit)}
-          </p>
-          <p className="text-xs text-stone-300 mt-3">
-            ยอดชำระงวดถัดไป รวมค่าปรับค้าง
-          </p>
-          <p className="text-2xl font-semibold text-amber-300">
-            ฿{money(todayDue)}
-          </p>
-          <ActionButton
-            className="w-full mt-3 rounded-xl bg-amber-300 text-stone-900 px-4 py-3 text-sm font-bold"
-            onClick={onOpenPayBill}
-          >
-            ดูบิล / ชำระบัตร
-          </ActionButton>
-          {totalOwed === 0 && (
-            <p className="text-xs text-stone-300 mt-3">ยังไม่มียอดค้างชำระ</p>
-          )}
-        </div>
-      )}
       <div className="mt-3 flex items-center justify-between bg-white rounded-2xl border-2 border-orange-100 px-4 py-3">
         <div className="flex items-center gap-2">
           <div className="w-9 h-9 rounded-xl bg-teal-50 flex items-center justify-center">
@@ -3007,14 +3011,10 @@ function HomeView({
         <Banknote size={17} className="text-orange-500" /> กู้เงิน
       </ActionButton>
 
-      <div className="grid grid-cols-2 gap-2 mt-3">
+      <div className="grid grid-cols-1 gap-2 mt-3">
         <ActionButton className="jp-secondary !text-xs" onClick={onReceive}>
           <QrCode size={15} />
           QR รับโอนของฉัน
-        </ActionButton>
-        <ActionButton className="jp-secondary !text-xs" onClick={onCard}>
-          <CreditCard size={15} />
-          บัตร / QR ของฉัน
         </ActionButton>
       </div>
       <div className="mt-5">
@@ -3070,16 +3070,19 @@ function HomeView({
                 className={`flex items-center gap-3 p-3.5 ${i !== 0 ? "border-t border-orange-50" : ""}`}
               >
                 <div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center text-lg shrink-0">
-                  {Number(other) === 0 ? "🏦" : "👤"}
+                  {Number(other) === 0
+                    ? "🏦"
+                    : (dir === "in" ? t.fromAvatar : t.toAvatar) || "👤"}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-semibold text-stone-800 truncate">
                     {Number(other) === 0
                       ? "ธนาคารจิ๋วเปย์"
-                      : fmtAccount(String(other))}
+                      : (dir === "in" ? t.fromName : t.toName) ||
+                        fmtAccount(String(other))}
                   </div>
                   <div className="text-[11px] text-stone-400">
-                    {t.memo} · วันที่ {t.day} {t.time}
+                    {t.memo} · วันที่ {t.day} {formatTransactionTime(t.time)}
                   </div>
                 </div>
                 <div
@@ -3302,7 +3305,7 @@ function LogoMark({
   );
 }
 
-function ScanHub({ user, lookup, onChoose, onCash, onCredit }) {
+function ScanHub({ user, lookup, onChoose, onCash, onCredit, onTransfer }) {
   const [tab, setTab] = useState("pay");
   const tabs = [
     ["pay", "สแกนจ่าย"],
@@ -3344,6 +3347,9 @@ function ScanHub({ user, lookup, onChoose, onCash, onCredit }) {
               ตรวจสอบชื่อและยอดก่อนยืนยันทุกครั้ง
             </p>
             <ScannerPanel mode="pay" lookup={lookup} onChoose={onChoose} />
+            <ActionButton className="jp-secondary w-full" onClick={onTransfer}>
+              กรอกเลขบัญชี → ไปหน้าโอนเงิน
+            </ActionButton>
           </>
         )}
         {tab === "collect" && (
@@ -3373,7 +3379,7 @@ const validAmount = (value) =>
 
 function nightShare(state) {
   const value = Number(state.nightPercent);
-  return [20, 25, 30, 50].includes(value) ? value / 100 : 0.5;
+  return [5, 10, 20, 25, 30, 50].includes(value) ? value / 100 : 0.5;
 }
 function clockPhase(total, state) {
   const day = Math.floor(total / 1440),
@@ -3516,3 +3522,90 @@ function PaymentRules({ loan = false }) {
 }
 
 export { clockPhase, phaseMinutes };
+
+function transactionParty(tx, account) {
+  const incoming = String(tx.toId) === String(account);
+  const id = incoming ? tx.fromId : tx.toId;
+  return String(id) === "0"
+    ? "ธนาคารจิ๋วเปย์"
+    : (incoming ? tx.fromName : tx.toName) ||
+        (id ? fmtAccount(String(id)) : "");
+}
+function formatTransactionTime(value) {
+  if (!value) return "—";
+  const text = String(value);
+  const iso = text.match(/T(\d{2}):(\d{2})/);
+  if (iso && text.endsWith("Z"))
+    return `${String((Number(iso[1]) + 7) % 24).padStart(2, "0")}:${iso[2]} น.`;
+  const plain = text.match(/^(\d{1,2}):(\d{2})/);
+  return plain ? `${plain[1].padStart(2, "0")}:${plain[2]} น.` : "—";
+}
+export { formatTransactionTime };
+
+function parseTapCard(hash) {
+  const match = String(hash).match(/^#tap=(\d{6})\.([1-9]\d{0,8})$/);
+  return match ? { account: match[1], qrVersion: Number(match[2]) } : null;
+}
+function TapCardPayment({ card, user, lookup, onCash, onCredit }) {
+  const [customer, setCustomer] = useState(null),
+    [error, setError] = useState(""),
+    [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setCustomer(null);
+    setError("");
+    (async () => {
+      try {
+        if (card.account === String(user.account))
+          throw Error("เปิดด้วยบัญชีร้านค้าที่รับเงิน ไม่ใช่บัญชีเจ้าของบัตร");
+        const found = await lookup(card.account, true);
+        if (!found) throw Error("ไม่พบบัตรหรือเชื่อมต่อไม่ได้ กรุณาลองใหม่");
+        if (!(found.qrEnabled === true || String(found.qrEnabled) === "true"))
+          throw Error("บัตรถูกระงับ กรุณาติดต่อแอดมิน");
+        if (Number(found.qrVersion) !== card.qrVersion)
+          throw Error("บัตรถูกออกใหม่แล้ว กรุณาใช้บัตรล่าสุด");
+        if (active) setCustomer({ ...found, scannedQrVersion: card.qrVersion });
+      } catch (e) {
+        if (active) setError(e.message);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [card.account, card.qrVersion, user.account, lookup, retry]);
+  if (error)
+    return (
+      <div className="jp-card p-5">
+        <Notice>{error}</Notice>
+        <ActionButton
+          className="jp-secondary mt-3"
+          onClick={() => setRetry((i) => i + 1)}
+        >
+          ตรวจสอบบัตรอีกครั้ง
+        </ActionButton>
+      </div>
+    );
+  if (!customer)
+    return (
+      <div role="status" className="jp-card p-5 flex gap-2">
+        <Loader2 className="animate-spin" size={18} />
+        กำลังตรวจสอบบัตร NFC...
+      </div>
+    );
+  return (
+    <>
+      <p className="text-xs text-stone-500 mb-3">
+        บัตรของ {customer.name} · เงินจะเข้าบัญชีร้าน {user.name}{" "}
+        ตรวจยอดและยืนยันก่อนรับชำระ
+      </p>
+      <PosPanel
+        user={user}
+        lookup={lookup}
+        onCash={onCash}
+        onCredit={onCredit}
+        initialCustomer={customer}
+      />
+    </>
+  );
+}
+export { parseTapCard };

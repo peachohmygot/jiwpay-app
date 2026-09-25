@@ -160,7 +160,7 @@ function normalizeUser(user) {
     safe[key] = number(safe[key]);
   for (const key of ["favoriteAccounts", "earnedBadges", "creditSchedules"])
     safe[key] = Array.isArray(safe[key]) ? safe[key] : [];
-  for (const key of ["negative", "qrEnabled", "hasCreditCard"])
+  for (const key of ["negative", "qrEnabled", "hasCreditCard", "accountPaused"])
     safe[key] =
       safe[key] === true || String(safe[key]).toLowerCase() === "true";
   return { ...safe, account: String(safe.account), loan: safe.loan || null };
@@ -796,6 +796,18 @@ function AdminDashboard({ adminKey, onLogout }) {
       }
       if (result.state)
         put({ ...ref.current, gameState: normalizeGame(result.state) }, true);
+      else if (result.user)
+        put(
+          {
+            ...ref.current,
+            users: ref.current.users.map((u) =>
+              String(u.account) === String(result.user.account)
+                ? normalizeUser(result.user)
+                : u,
+            ),
+          },
+          true,
+        );
       else put(ref.current, true);
       notify(title, "");
       return result;
@@ -1043,6 +1055,7 @@ function AdminDashboard({ adminKey, onLogout }) {
       badge: pendingLoans.length,
     },
     { key: "users", label: "บัญชีผู้ใช้", icon: Users },
+    { key: "debts", label: "ยอดค้าง / พักบัญชี", icon: Banknote },
     { key: "badges", label: "เหรียญ", icon: Award },
     { key: "announcement", label: "ประกาศ", icon: Megaphone },
   ];
@@ -1120,6 +1133,14 @@ function AdminDashboard({ adminKey, onLogout }) {
         className="border-0 p-0 min-w-0"
       >
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5">
+          {tab === "debts" && (
+            <DebtPanel
+              users={users}
+              onSubmit={(body) =>
+                mutate("admin-debt", { type: "admin_debt", ...body }, null)
+              }
+            />
+          )}
           {tab === "overview" && (
             <div>
               <h1 className="jp-heading text-xl mb-4">ภาพรวมระบบ</h1>
@@ -1258,7 +1279,7 @@ function AdminDashboard({ adminKey, onLogout }) {
                     onChange={(event) => setNightPercent(event.target.value)}
                     className="block w-full p-3 mt-2 rounded-xl border-2 border-orange-100 bg-white"
                   >
-                    {[20, 25, 30, 50].map((value) => (
+                    {[5, 10, 20, 25, 30, 50].map((value) => (
                       <option key={value} value={value}>
                         {value}%
                         {value === 50
@@ -1564,7 +1585,7 @@ function AdminDashboard({ adminKey, onLogout }) {
                         ) : (
                           <QrCode size={13} />
                         )}{" "}
-                        ออกบัตรใหม่
+                        ออกบัตรใหม่ · QR + NFC
                       </ActionButton>
                     </div>
                     <ActionButton
@@ -2064,6 +2085,15 @@ function Modal(props) {
 function VisaCard({ user }) {
   const [printError, setPrintError] = useState("");
   const [cardImage, setCardImage] = useState(null);
+  const [nfcCopied, setNfcCopied] = useState(false);
+  const nfcUrl =
+    window.location.protocol === "https:"
+      ? buildNfcUrl(
+          window.location.href,
+          user.account,
+          Math.max(1, number(user.qrVersion)),
+        )
+      : "";
   const version = Math.max(1, number(user.qrVersion));
   const payload = JSON.stringify({
     action: "jiwpay_card",
@@ -2071,14 +2101,14 @@ function VisaCard({ user }) {
     cardType: user.hasCreditCard ? "visa" : "wallet",
     qrVersion: version,
   });
-  useEffect(() => setCardImage(null), [payload, user.name, user.qrEnabled]);
+  useEffect(() => { setCardImage(null); setNfcCopied(false); }, [payload, user.name, user.qrEnabled]);
   return (
     <details className="jp-card overflow-hidden mt-4">
       <summary className="cursor-pointer p-4 flex items-center gap-2 text-sm font-semibold">
         <CreditCard size={18} className="text-orange-500" />
         {user.hasCreditCard
-          ? "บัตร Visa / QR สำหรับให้ร้านค้าสแกน"
-          : "บัตร JiwPay / QR สำหรับให้ร้านค้าสแกน"}
+          ? "บัตร Visa / QR / ลิงก์ NFC"
+          : "บัตร JiwPay / QR / ลิงก์ NFC"}
         <span className="ml-auto text-stone-400">⌄</span>
       </summary>
       <div className="px-4 pb-5">
@@ -2125,6 +2155,44 @@ function VisaCard({ user }) {
           >
             เตรียมรูปบัตรแนวนอน
           </ActionButton>
+        )}
+        {user.qrEnabled && (
+          <div className="mt-4 p-3 rounded-xl bg-orange-50 space-y-2">
+            <p className="text-sm font-semibold">
+              ตั้งบัตร NFC · รุ่น {version} · iPhone / Android
+            </p>
+            {nfcUrl ? (
+              <>
+                <input
+                  aria-label="ลิงก์สำหรับเขียนลงบัตร NFC"
+                  readOnly
+                  value={nfcUrl}
+                  className="w-full rounded-lg p-2 text-xs"
+                  onFocus={(e) => e.target.select()}
+                />
+                <ActionButton
+                  className="jp-secondary w-full"
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(nfcUrl);
+                    setNfcCopied(true);
+                  }}
+                >
+                  {nfcCopied ? "คัดลอกแล้ว" : "คัดลอกลิงก์ NFC"}
+                </ActionButton>
+              </>
+            ) : (
+              <p className="text-xs">
+                เปิดหน้าแอดมินบนเว็บ HTTPS จริงเพื่อคัดลอกลิงก์
+                ไม่ใช้ลิงก์จากเครื่องพรีวิว
+              </p>
+            )}
+            <p className="text-xs text-stone-600">
+              ใช้ NFC Tools → Write → Add a record → URL/URI
+              วางลิงก์นี้แล้วเขียนลงบัตร QR และ NFC ใช้บัตรรุ่นเดียวกัน
+              ออกบัตรใหม่แล้วทั้ง QR และลิงก์เดิมใช้รับชำระไม่ได้ ต้องเขียน NFC และเปลี่ยน QR ใหม่ด้วย
+              แตะบัตรเพื่อเปิดหน้ารับชำระ ไม่ตัดเงินเพียงแค่เปิดลิงก์
+            </p>
+          </div>
         )}
         {cardImage && user.qrEnabled && (
           <div className="mt-4 space-y-3">
@@ -2327,7 +2395,7 @@ function LogoMark({
 
 function nightShare(state) {
   const value = Number(state.nightPercent);
-  return [20, 25, 30, 50].includes(value) ? value / 100 : 0.5;
+  return [5, 10, 20, 25, 30, 50].includes(value) ? value / 100 : 0.5;
 }
 function clockPhase(total, state) {
   const day = Math.floor(total / 1440),
@@ -2425,3 +2493,175 @@ function formatDuration(seconds) {
   const n = Math.round(seconds);
   return `${Math.floor(n / 60)} นาที ${n % 60} วินาทีจริง`;
 }
+
+function DebtPanel({ users, onSubmit }) {
+  const [selected, setSelected] = useState(null),
+    [error, setError] = useState("");
+  const rows = users
+    .map((u) => {
+      const negative = Math.max(0, -Number(u.balance || 0));
+      const loan = u.loan
+        ? Math.max(0, Number(u.loan.days) - Number(u.loan.daysPaid || 0)) *
+            Number(u.loan.dailyInstallment || 0) +
+          Number(u.loan.overdueAmount || 0)
+        : 0;
+      const credit = (u.creditSchedules || []).reduce(
+        (sum, sc) =>
+          sum +
+          (sc.daysPaid < sc.days
+            ? (sc.days - sc.daysPaid) * sc.dailyAmount +
+              Number(sc.overdueAmount || 0)
+            : 0),
+        0,
+      );
+      const fees = (u.creditSchedules || []).reduce(
+        (sum, sc) => sum + Number(sc.overdueAmount || 0),
+        0,
+      );
+      return { ...u, debts: { negative, loan, credit }, fees };
+    })
+    .filter(
+      (u) =>
+        u.accountPaused || u.debts.negative || u.debts.loan || u.debts.credit,
+    );
+  const choose = (u, action) => {
+    setError("");
+    setSelected({
+      account: u.account,
+      name: u.name,
+      action,
+      amount: u.debts[action] || 0,
+      requestId:
+        globalThis.crypto?.randomUUID?.() ||
+        String(Date.now()) + "-" + Math.random().toString(36).slice(2),
+    });
+  };
+  return (
+    <div className="space-y-4">
+      <h2 className="jp-heading text-xl">ยอดค้าง / พักบัญชี</h2>
+      <p className="text-xs text-stone-500">
+        ยอดปิดหนี้แยกจากงวดค้าง ยอดที่หักจนติดลบแล้วไม่รวมซ้ำในเงินกู้
+        การพักบัญชีหยุดการจ่ายออก แต่ยังรับเงินและคิดรอบรายวันตามกติกาเดิม
+      </p>
+      {!rows.length && <p>ไม่มีหนี้หรือบัญชีที่พักอยู่</p>}
+      {rows.map((u) => (
+        <div key={u.account} className="jp-card p-4 space-y-2">
+          <h3 className="font-bold">
+            {u.name} · {u.account}
+          </h3>
+          <p className="text-sm">
+            {u.accountPaused || u.debts.negative
+              ? "⏸ พักการจ่ายออก"
+              : "เปิดใช้งาน"}
+          </p>
+          <p className="text-sm">
+            ยอดติดลบ: ฿{u.debts.negative.toLocaleString()}
+          </p>
+          <p className="text-sm">
+            เงินกู้คงเหลือทั้งหมด: ฿{u.debts.loan.toLocaleString()}
+            {u.loan?.status === "missed"
+              ? " · ค้างงวด ฿" +
+                u.loan.dailyInstallment +
+                " ตั้งแต่วันที่ " +
+                u.loan.missedSinceDay
+              : ""}
+          </p>
+          <p className="text-sm">
+            บัตรคงเหลือทั้งหมด: ฿{u.debts.credit.toLocaleString()} ·
+            รวมค่าปรับค้าง ฿{u.fees.toLocaleString()}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {[
+              ["negative", "รับเงินสดชำระยอดติดลบ"],
+              ["loan", "รับเงินสดปิดเงินกู้"],
+              ["credit", "รับเงินสดปิดบัตร"],
+            ].map(
+              ([key, label]) =>
+                u.debts[key] > 0 && (
+                  <ActionButton
+                    key={key}
+                    className="jp-secondary text-xs"
+                    onClick={() => choose(u, key)}
+                  >
+                    {label}
+                  </ActionButton>
+                ),
+            )}
+            <ActionButton
+              className="jp-secondary text-xs"
+              onClick={() =>
+                choose(
+                  u,
+                  u.accountPaused || u.debts.negative ? "resume" : "pause",
+                )
+              }
+            >
+              {u.accountPaused || u.debts.negative ? "ปลดพักบัญชี" : "พักบัญชี"}
+            </ActionButton>
+          </div>
+        </div>
+      ))}
+      {selected && (
+        <div
+          role="dialog"
+          aria-label="ยืนยันจัดการยอดค้าง"
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-5"
+        >
+          <div className="jp-card p-5 max-w-sm w-full space-y-4">
+            <h3 className="font-bold">{selected.name}</h3>
+            <p>
+              {selected.amount
+                ? "ยืนยันว่าได้รับเงินสดแล้ว ฿" +
+                  selected.amount.toLocaleString()
+                : selected.action === "pause"
+                  ? "พักการจ่ายออกของบัญชีนี้"
+                  : "ปลดพักบัญชีนี้หลังจัดการยอดค้าง"}
+            </p>
+            <p className="text-xs">
+              การรับเงินสดตัดหนี้ประเภทที่เลือกโดยตรง ไม่เพิ่มยอดกระเป๋า
+              และไม่ปลดพักอัตโนมัติ
+            </p>
+            {error && (
+              <p role="alert" className="text-red-600">
+                {error}
+              </p>
+            )}
+            <ActionButton
+              className="jp-primary w-full"
+              onClick={async () => {
+                const r = await onSubmit(selected);
+                if (r.ok) setSelected(null);
+                else setError(r.error || "บันทึกไม่ได้");
+              }}
+            >
+              ยืนยันบันทึก
+            </ActionButton>
+            <ActionButton
+              className="jp-secondary w-full"
+              onClick={() => setSelected(null)}
+            >
+              ยกเลิก
+            </ActionButton>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function buildNfcUrl(base, account, version) {
+  const url = new URL(base);
+  if (
+    url.protocol !== "https:" ||
+    !/^\d{6}$/.test(String(account)) ||
+    !Number.isSafeInteger(Number(version)) ||
+    Number(version) < 1 ||
+    Number(version) > 999999999
+  )
+    throw Error("ข้อมูลลิงก์บัตรไม่ถูกต้อง");
+  url.pathname = url.pathname.replace(/\/admin\/?$/, "/");
+  url.search = "";
+  url.hash = "tap=" + account + "." + version;
+  return url.href;
+}
+export { buildNfcUrl };
