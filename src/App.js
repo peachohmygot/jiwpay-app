@@ -187,6 +187,7 @@ function normalizeGame(row) {
     return null;
   return {
     ...row,
+    clockReceivedAt: row.clockReceivedAt || Date.now(),
     day,
     hour,
     minute,
@@ -642,26 +643,60 @@ function ClientSession({ account, onAccount }) {
   const refresh = useCallback(
     (fresh = false) => {
       if (writing.current) return Promise.resolve(false);
-      if (refreshLock.current && !fresh) return refreshLock.current;
+      if (refreshLock.current?.version === generation.current)
+        return refreshLock.current;
       const version = ++generation.current;
       const task = (async () => {
+        const active = () =>
+          alive.current && generation.current === version && !writing.current;
+        const fetchPart = async (sheet, params = {}) => {
+          const result = await apiGet({ sheet, ...params }, fresh);
+          if (active() && result.ok && Array.isArray(result.rows)) {
+            put((old) => {
+              if (sheet === "Users")
+                return { ...old, currentUser: normalizeUser(result.rows[0]) };
+              if (sheet === "GameState") {
+                const gameTime = normalizeGame(result.rows[0]);
+                return {
+                  ...old,
+                  gameTime,
+                  announcement: gameTime?.announcement || "",
+                };
+              }
+              const field = {
+                Transactions: "transactions",
+                Topups: "topups",
+                LoanRequests: "loanRequests",
+                Badges: "badges",
+              }[sheet];
+              return {
+                ...old,
+                [field]:
+                  sheet === "Transactions"
+                    ? sortTransactions(result.rows)
+                    : result.rows,
+              };
+            }, true);
+          }
+          return result;
+        };
         const cachedId = ref.current.currentUser?.id;
         const requests =
           cachedId != null
             ? Promise.all([
-                apiGet({ sheet: "Topups", userId: cachedId }, fresh),
-                apiGet({ sheet: "LoanRequests", userId: cachedId }, fresh),
+                fetchPart("Topups", { userId: cachedId }),
+                fetchPart("LoanRequests", { userId: cachedId }),
               ])
             : null;
         const [me, tx, badgeResult, gameResult] = await Promise.all([
           account
-            ? apiGet({ sheet: "Users", userId: account }, fresh)
+            ? fetchPart("Users", { userId: account })
             : Promise.resolve({ ok: true, rows: [] }),
           account
-            ? apiGet({ sheet: "Transactions", userId: account }, fresh)
+            ? fetchPart("Transactions", { userId: account })
             : Promise.resolve({ ok: true, rows: [] }),
-          apiGet({ sheet: "Badges" }, fresh),
-          apiGet({ sheet: "GameState" }, fresh),
+          fetchPart("Badges"),
+          fetchPart("GameState"),
         ]);
         const user = me.ok
           ? normalizeUser(me.rows?.[0])
@@ -671,8 +706,8 @@ function ClientSession({ account, onAccount }) {
           account && user
             ? await (requests ||
                 Promise.all([
-                  apiGet({ sheet: "Topups", userId: user.id }, fresh),
-                  apiGet({ sheet: "LoanRequests", userId: user.id }, fresh),
+                  fetchPart("Topups", { userId: user.id }),
+                  fetchPart("LoanRequests", { userId: user.id }),
                 ]))
             : [
                 { ok: !account, rows: [] },
@@ -692,27 +727,6 @@ function ClientSession({ account, onAccount }) {
         const nextGame = gameResult.ok
           ? normalizeGame(gameResult.rows?.[0])
           : ref.current.gameTime;
-        put(
-          (old) => ({
-            ...old,
-            currentUser: me.ok ? user : old.currentUser,
-            transactions:
-              tx.ok && Array.isArray(tx.rows)
-                ? sortTransactions(tx.rows)
-                : old.transactions,
-            topups: topupResult.ok ? topupResult.rows : old.topups,
-            loanRequests: loanResult.ok ? loanResult.rows : old.loanRequests,
-            badges:
-              badgeResult.ok && Array.isArray(badgeResult.rows)
-                ? badgeResult.rows
-                : old.badges,
-            gameTime: nextGame,
-            announcement: gameResult.ok
-              ? nextGame?.announcement || ""
-              : old.announcement,
-          }),
-          true,
-        );
         setSyncError(
           failure?.error ||
             (account && !user
@@ -725,6 +739,7 @@ function ClientSession({ account, onAccount }) {
       })().finally(() => {
         if (refreshLock.current === task) refreshLock.current = null;
       });
+      task.version = version;
       refreshLock.current = task;
       return task;
     },
@@ -738,11 +753,13 @@ function ClientSession({ account, onAccount }) {
     const interval = setInterval(sync, 60000);
     window.addEventListener("online", sync);
     window.addEventListener("focus", sync);
+    document.addEventListener("visibilitychange", sync);
     return () => {
       refreshLock.current = null;
       clearInterval(interval);
       window.removeEventListener("online", sync);
       window.removeEventListener("focus", sync);
+      document.removeEventListener("visibilitychange", sync);
     };
   }, [refresh]);
   const doGlobalRefresh = async () => {
@@ -1103,9 +1120,18 @@ function ClientSession({ account, onAccount }) {
               <span
                 className={`h-1.5 w-1.5 rounded-full ${gameTime ? "bg-[#729660]" : "bg-[#d4a66a]"}`}
               />
-              {fmtGameTime(gameTime)}
+              <GameClock state={gameTime} />
             </div>
             <Notice>{syncError}</Notice>
+            {pendingAction && (
+              <div
+                role="status"
+                className="mb-3 flex items-center gap-2 rounded-xl bg-orange-50 px-3 py-2 text-xs text-orange-800"
+              >
+                <Loader2 size={15} className="animate-spin shrink-0" />
+                กำลังบันทึกรายการ ยอดที่แสดงกำลังรอยืนยันจากระบบ
+              </div>
+            )}
           </div>
           {currentUser ? (
             <WalletApp
@@ -1373,6 +1399,7 @@ function WalletApp({
           )}
           {page === "loan" && (
             <div className="px-5">
+              <PaymentRules loan />
               <RequestForm
                 loan
                 user={user}
@@ -1955,6 +1982,7 @@ function CreditBill({ user, onPay }) {
   return (
     <div className="space-y-4">
       <VisaCard user={user} />
+      <PaymentRules />
       <div className="rounded-3xl bg-[#594034] text-white p-6">
         <p className="text-xs opacity-60">ยอดค้างชำระทั้งหมด</p>
         <p className="jp-number text-4xl mt-3">฿{money(total)}</p>
@@ -2884,6 +2912,32 @@ function HomeView({
         )}
       </div>
 
+      {(user.hasCreditCard || user.creditSchedules.length > 0) && (
+        <div className="mt-4 rounded-2xl bg-stone-800 text-white p-4 border-2 border-amber-300">
+          <div className="flex justify-between">
+            <h2 className="font-semibold">บัตร JiwPay Visa</h2>
+            <span className="font-bold italic text-amber-300">VISA</span>
+          </div>
+          <p className="text-xs text-stone-300 mt-2">
+            วงเงินคงเหลือ ฿{money(user.availableCredit)}
+          </p>
+          <p className="text-xs text-stone-300 mt-3">
+            ยอดชำระงวดถัดไป รวมค่าปรับค้าง
+          </p>
+          <p className="text-2xl font-semibold text-amber-300">
+            ฿{money(todayDue)}
+          </p>
+          <ActionButton
+            className="w-full mt-3 rounded-xl bg-amber-300 text-stone-900 px-4 py-3 text-sm font-bold"
+            onClick={onOpenPayBill}
+          >
+            ดูบิล / ชำระบัตร
+          </ActionButton>
+          {totalOwed === 0 && (
+            <p className="text-xs text-stone-300 mt-3">ยังไม่มียอดค้างชำระ</p>
+          )}
+        </div>
+      )}
       <div className="mt-3 flex items-center justify-between bg-white rounded-2xl border-2 border-orange-100 px-4 py-3">
         <div className="flex items-center gap-2">
           <div className="w-9 h-9 rounded-xl bg-teal-50 flex items-center justify-center">
@@ -3313,6 +3367,152 @@ function ScanHub({ user, lookup, onChoose, onCash, onCredit }) {
 }
 
 const validAmount = (value) =>
-    Number.isFinite(Number(value)) &&
-    Number(value) > 0 &&
-    Number(value) <= Number.MAX_SAFE_INTEGER;
+  Number.isFinite(Number(value)) &&
+  Number(value) > 0 &&
+  Number(value) <= Number.MAX_SAFE_INTEGER;
+
+function nightShare(state) {
+  const value = Number(state.nightPercent);
+  return [20, 25, 30, 50].includes(value) ? value / 100 : 0.5;
+}
+function clockPhase(total, state) {
+  const day = Math.floor(total / 1440),
+    m = total - day * 1440,
+    n = nightShare(state);
+  return (
+    day +
+    (m < 360
+      ? ((m / 360) * n) / 2
+      : m < 1080
+        ? n / 2 + ((m - 360) / 720) * (1 - n)
+        : 1 - n / 2 + (((m - 1080) / 360) * n) / 2)
+  );
+}
+function phaseMinutes(phase, state) {
+  const day = Math.floor(phase),
+    f = phase - day,
+    n = nightShare(state);
+  const minutes =
+    day * 1440 +
+    (f < n / 2
+      ? (f / (n / 2)) * 360
+      : f < 1 - n / 2
+        ? 360 + ((f - n / 2) / (1 - n)) * 720
+        : 1080 + ((f - (1 - n / 2)) / (n / 2)) * 360);
+  return Math.round(minutes * 1e8) / 1e8;
+}
+
+function GameClock({ state, large = false }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  if (!state) return <span>กำลังซิงค์เวลา...</span>;
+  const enabled =
+    state.clockEnabled === true || String(state.clockEnabled) === "true";
+  const paused =
+    state.gamePaused === true || String(state.gamePaused) === "true";
+  const speed = number(state.realMinutesPerDay) || 30;
+  const serverNow =
+    number(state.serverNowMs) +
+    Math.max(0, now - number(state.clockReceivedAt || now));
+  const anchored = enabled && number(state.anchorRealMs) > 0;
+  let total = anchored
+    ? phaseMinutes(
+        clockPhase(number(state.anchorGameMinutes), state) +
+          (paused
+            ? 0
+            : Math.max(0, serverNow - number(state.anchorRealMs)) /
+              (speed * 60000)),
+        state,
+      )
+    : (state.day - 1) * 1440 + state.hour * 60 + state.minute;
+  if (state.syncPending)
+    total = (state.day - 1) * 1440 + state.hour * 60 + state.minute;
+  const day = Math.floor(total / 1440) + 1,
+    minute = Math.floor(total % 1440);
+  const secondsLeft = Math.ceil(
+    (Math.floor(total / 1440) + 1 - clockPhase(total, state)) * speed * 60,
+  );
+  const time = `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+  return (
+    <span className={large ? "block" : "inline-block"}>
+      <span className={large ? "block text-3xl font-bold text-stone-800" : ""}>
+        {large ? `${time} น.` : `วันที่ ${day} · ${time} น.`}
+      </span>
+      {large && (
+        <span className="block text-sm font-semibold text-orange-600 mt-1">
+          วันที่ {day}
+        </span>
+      )}
+      <span
+        className={
+          large ? "block text-xs text-stone-500 mt-3" : "block text-[10px] mt-1"
+        }
+      >
+        {state.syncPending
+          ? "กำลังปิดบัญชีวันในเกม..."
+          : !enabled
+            ? "รอผู้ดูแลเริ่มนาฬิกาเกม"
+            : paused
+              ? "หยุดเวลาเกมชั่วคราว"
+              : `ขึ้นวันใหม่ใน ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, "0")} นาทีจริง · ${speed} นาที = 1 วัน`}
+      </span>
+    </span>
+  );
+}
+
+function PaymentRules({ loan = false }) {
+  return (
+    <details className="jp-card p-4 my-4 text-xs text-stone-600 leading-relaxed">
+      <summary className="cursor-pointer font-semibold text-stone-800">
+        {loan
+          ? "กติกาเงินกู้และการจ่ายล่าช้า"
+          : "กติกาบัตร Visa และการจ่ายล่าช้า"}
+      </summary>
+      {loan ? (
+        <div className="mt-3 space-y-2">
+          <p>
+            แผนกู้ 3 วัน ดอกเบี้ยรวม 10% หรือ 5 วัน ดอกเบี้ยรวม 20%
+            ยอดรวมและยอดต่อวันปัดขึ้นเป็นบาทตามกติกาเดิม
+          </p>
+          <p>
+            เมื่อปิดวันเกม ระบบหักค่างวดจากกระเป๋าอัตโนมัติ
+            ถ้าเงินไม่พอจะขึ้นสถานะค้างชำระ
+            รอบปิดวันถัดไปจะหักค่างวดพร้อมค่าปรับ และยอดเงินอาจติดลบ
+          </p>
+          <p>
+            ค่าปรับ = ค่างวด × อัตราของแผนกู้ ×
+            จำนวนวันที่นับจากวันเริ่มค้างรวมวันปัจจุบัน แล้วปัดขึ้น เช่น
+            รอบปิดวันถัดจากวันเริ่มค้างนับเป็น 2 วัน
+          </p>
+          <p>
+            หากฝากกระปุกระหว่างค้าง ระบบกันเงินฝากไปชำระค่างวดก่อนตามกติกาเดิม
+          </p>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          <p>
+            ผ่อน 0% 3 หรือ 5 งวด ชำระเป็นรายวันเกม ต้องกดชำระบิลเอง
+            หรือเลือกปิดยอดทั้งหมด
+          </p>
+          <p>
+            เมื่อปิดวันเกม หากยังผ่อนไม่ครบและไม่ได้ชำระในวันนั้น จะเพิ่มค่าปรับ
+            5% ของยอดผ่อนต่อวันเข้ายอดค้าง แล้วปัดยอดค่าปรับสะสมขึ้นเป็นบาท
+          </p>
+          <p>
+            การชำระยอดรายวันหักจากกระเป๋า รวมค่าปรับที่ค้าง
+            และคืนวงเงินส่วนค่างวดตามกติกาเดิม
+          </p>
+          <p>
+            วงเงินตั้งต้นคิดจากเงินในกระปุก 50%
+            ไม่มีค่าธรรมเนียมออกบัตรในกติกาเดิม
+          </p>
+        </div>
+      )}
+    </details>
+  );
+}
+
+export { clockPhase, phaseMinutes };

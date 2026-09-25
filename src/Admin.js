@@ -183,6 +183,7 @@ function normalizeGame(row) {
     return null;
   return {
     ...row,
+    clockReceivedAt: row.clockReceivedAt || Date.now(),
     day,
     hour,
     minute,
@@ -519,18 +520,7 @@ function PendingBanner({ active }) {
 }
 
 const ADMIN_SESSION_KEY = "jiwpay_admin_key";
-const AVATAR_POOL = [
-  "🐻",
-  "🐼",
-  "🐱",
-  "🐰",
-  "👦",
-  "👧",
-  "🐶",
-  "🐸",
-  "🦊",
-  "🐨",
-];
+const AVATAR_POOL = ["🐻", "🐼", "🐱", "🐰", "🐶", "🐸", "🦊", "🐨"];
 export default function AdminDashboardApp() {
   const [adminKey, setAdminKey] = useState(
     () => storageGet(ADMIN_SESSION_KEY) || "",
@@ -685,7 +675,8 @@ function AdminDashboard({ adminKey, onLogout }) {
   const refreshAll = useCallback(
     (fresh = false) => {
       if (writing.current) return Promise.resolve(false);
-      if (refreshLock.current && !fresh) return refreshLock.current;
+      if (refreshLock.current?.version === generation.current)
+        return refreshLock.current;
       const version = ++generation.current;
       const task = (async () => {
         const sheets = [
@@ -696,43 +687,56 @@ function AdminDashboard({ adminKey, onLogout }) {
           "Badges",
           "GameState",
         ];
-        const results = await Promise.all(
-          sheets.map((sheet) => apiGet({ sheet, adminKey }, fresh)),
-        );
-        if (!alive.current || version !== generation.current || writing.current)
-          return false;
-        const [u, t, tp, ln, b, gs] = results;
-        if (gs.ok && gs.scope !== "admin") {
-          setAuthorized(false);
-          setSyncError("รหัสแอดมินใช้ไม่ได้ กรุณาออกจากระบบแล้วใส่รหัสใหม่");
-          return false;
-        }
-        if (gs.ok) setAuthorized(true);
+        const active = () =>
+          alive.current && version === generation.current && !writing.current;
         const valid = (result) =>
           result.ok && result.scope === "admin" && Array.isArray(result.rows);
-        put(
-          (old) => ({
-            users: valid(u)
-              ? u.rows.map(normalizeUser).filter(Boolean)
-              : old.users,
-            transactions: valid(t)
-              ? sortTransactions(t.rows)
-              : old.transactions,
-            topups: valid(tp) ? tp.rows : old.topups,
-            loanRequests: valid(ln) ? ln.rows : old.loanRequests,
-            badges: valid(b) ? b.rows : old.badges,
-            gameState: valid(gs) ? normalizeGame(gs.rows[0]) : old.gameState,
+        const results = await Promise.all(
+          sheets.map(async (sheet) => {
+            const result = await apiGet({ sheet, adminKey }, fresh);
+            if (!active()) return result;
+            if (result.ok && result.scope !== "admin") {
+              setAuthorized(false);
+              return {
+                ok: false,
+                error: "รหัสแอดมินใช้ไม่ได้ กรุณาออกจากระบบแล้วใส่รหัสใหม่",
+              };
+            }
+            if (valid(result)) {
+              if (sheet === "GameState") {
+                setAuthorized(true);
+                if (!draftDirty.current)
+                  setAnnouncementDraft(result.rows[0]?.announcement || "");
+              }
+              const field = {
+                Users: "users",
+                Transactions: "transactions",
+                Topups: "topups",
+                LoanRequests: "loanRequests",
+                Badges: "badges",
+                GameState: "gameState",
+              }[sheet];
+              const value =
+                sheet === "Users"
+                  ? result.rows.map(normalizeUser).filter(Boolean)
+                  : sheet === "Transactions"
+                    ? sortTransactions(result.rows)
+                    : sheet === "GameState"
+                      ? normalizeGame(result.rows[0])
+                      : result.rows;
+              put((old) => ({ ...old, [field]: value }), true);
+            }
+            return result;
           }),
-          true,
         );
-        if (valid(gs) && !draftDirty.current)
-          setAnnouncementDraft(gs.rows[0]?.announcement || "");
+        if (!active()) return false;
         const failure = results.find((result) => !valid(result));
         setSyncError(failure?.error || "");
         return !failure;
       })().finally(() => {
         if (refreshLock.current === task) refreshLock.current = null;
       });
+      task.version = version;
       refreshLock.current = task;
       return task;
     },
@@ -782,7 +786,17 @@ function AdminDashboard({ adminKey, onLogout }) {
         if (result.uncertain) setSyncError(result.error);
         return result;
       }
-      put(ref.current, true);
+      if (body.clockAction && !result.state) {
+        put(before);
+        notify(
+          "กรุณาอัปเดต Apps Script",
+          "ระบบเวลาต้องใช้ Code.gs รุ่นใหม่ก่อน",
+        );
+        return { ok: false, error: "กรุณาอัปเดต Apps Script" };
+      }
+      if (result.state)
+        put({ ...ref.current, gameState: normalizeGame(result.state) }, true);
+      else put(ref.current, true);
       notify(title, "");
       return result;
     } catch {
@@ -929,31 +943,47 @@ function AdminDashboard({ adminKey, onLogout }) {
       ...state,
       badges: state.badges.filter((badge) => badge.id !== id),
     }));
-  const updateGame = (key, state) =>
-    mutate(key, { type: "game_state", state }, (old) => ({
-      ...old,
-      gameState: state,
-    }));
+  const [nightPercent, setNightPercent] = useState(
+    String(gameState?.nightPercent || 25),
+  );
+  useEffect(() => {
+    setNightPercent(String(gameState?.nightPercent || 25));
+  }, [gameState?.nightPercent]);
+  const [clockSpeed, setClockSpeed] = useState(
+    String(gameState?.realMinutesPerDay || 30),
+  );
+  useEffect(() => {
+    if (gameState?.realMinutesPerDay)
+      setClockSpeed(String(gameState.realMinutesPerDay));
+  }, [gameState?.realMinutesPerDay]);
+  const updateGame = (key, state, clockAction) =>
+    mutate(
+      key,
+      {
+        type: "game_state",
+        state: { ...gameState, ...state },
+        ...(clockAction ? { clockAction } : {}),
+      },
+      null,
+    );
   const initializeGame = () =>
-    updateGame("initialize", {
-      day: 1,
-      hour: 6,
-      minute: 0,
-      timeScale: 1,
-      gamePaused: false,
-      announcement: "",
-    });
+    updateGame(
+      "initialize",
+      { day: 1, hour: 6, minute: 0, gamePaused: true, announcement: "" },
+      "initialize",
+    );
   const togglePause = () =>
-    updateGame("pause", { ...gameState, gamePaused: !gameState.gamePaused });
-  const skipNight = () => {
-    const total = gameState.hour * 60 + gameState.minute + 720;
-    return updateGame("skip-night", {
-      ...gameState,
-      day: gameState.day + Math.floor(total / 1440),
-      hour: Math.floor((total % 1440) / 60),
-      minute: total % 60,
-    });
-  };
+    updateGame("pause", {}, gameState.gamePaused ? "resume" : "pause");
+  const skipNight = () => updateGame("skip-night", {}, "skip");
+  const changeSpeed = () =>
+    updateGame(
+      "clock-speed",
+      {
+        realMinutesPerDay: Number(clockSpeed),
+        nightPercent: Number(nightPercent),
+      },
+      "set_speed",
+    );
   const publishAnnouncement = async () => {
     const result = await updateGame("announcement", {
       ...gameState,
@@ -1029,7 +1059,7 @@ function AdminDashboard({ adminKey, onLogout }) {
             <div>
               <Brand admin />
               <div className="text-[11px] text-stone-400">
-                {fmtGameTime(gameState)}
+                <GameClock state={gameState} />
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -1199,25 +1229,70 @@ function AdminDashboard({ adminKey, onLogout }) {
                 ระบบจัดการเวลาในเกม
               </h2>
               <div className="bg-white rounded-2xl border-2 border-orange-100 p-5 text-center mb-4">
-                <div
-                  className="font-bold text-3xl text-stone-800"
-                  style={{ fontFamily: "Mitr, sans-serif" }}
-                >
-                  {String(gameState.hour).padStart(2, "0")}:
-                  {String(gameState.minute).padStart(2, "0")} น.
-                </div>
-                <div className="text-sm font-semibold text-orange-600 mt-1">
-                  วันที่ {gameState.day}
-                </div>
+                <GameClock state={gameState} large />
                 {gameState.gamePaused && (
                   <div className="mt-2 inline-block text-xs font-bold text-pink-600 bg-pink-50 px-3 py-1 rounded-full">
                     ⏸️ หยุดชั่วคราว
                   </div>
                 )}
               </div>
+              <div className="jp-card p-5 mb-4">
+                <label className="block text-sm font-semibold text-stone-700">
+                  เวลาโลกจริงต่อ 1 วันเกม
+                  <select
+                    value={clockSpeed}
+                    onChange={(event) => setClockSpeed(event.target.value)}
+                    className="block w-full p-3 mt-2 rounded-xl border-2 border-orange-100 bg-white"
+                  >
+                    {[10, 15, 20, 30, 40, 60].map((value) => (
+                      <option key={value} value={value}>
+                        {value} นาที = 1 วันในเกม
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-sm font-semibold text-stone-700 mt-4">
+                  สัดส่วนเวลากลางคืน (18:00–06:00)
+                  <select
+                    value={nightPercent}
+                    onChange={(event) => setNightPercent(event.target.value)}
+                    className="block w-full p-3 mt-2 rounded-xl border-2 border-orange-100 bg-white"
+                  >
+                    {[20, 25, 30, 50].map((value) => (
+                      <option key={value} value={value}>
+                        {value}%
+                        {value === 50
+                          ? " · กลางวันและกลางคืนเท่ากัน"
+                          : " ของเวลาทั้งวัน"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="text-sm text-orange-700 mt-3" role="status">
+                  กลางวัน 06:00–18:00:{" "}
+                  {formatDuration(
+                    Number(clockSpeed) * 60 * (1 - Number(nightPercent) / 100),
+                  )}
+                  <br />
+                  กลางคืน 18:00–06:00:{" "}
+                  {formatDuration(
+                    (Number(clockSpeed) * 60 * Number(nightPercent)) / 100,
+                  )}
+                </p>
+                <ActionButton
+                  className="jp-primary w-full mt-3"
+                  onClick={changeSpeed}
+                >
+                  {gameState.clockEnabled ? "บันทึกความเร็ว" : "เริ่มนาฬิกาเกม"}
+                </ActionButton>
+                <p className="text-xs text-stone-500 mt-3">
+                  แนะนำ 30 นาที · เปลี่ยนความเร็วแล้วเวลาเดินต่อจากจุดเดิม
+                  เกมจะเดินต่อแม้ปิดเว็บจนกดหยุดเกม
+                </p>
+              </div>
               <ActionButton
                 onClick={togglePause}
-                disabled={busyAction === "pause"}
+                disabled={busyAction === "pause" || !gameState.clockEnabled}
                 className={`w-full flex items-center justify-center gap-2 py-4 rounded-2xl font-semibold text-white mb-4 disabled:opacity-60 ${gameState.gamePaused ? "bg-teal-500" : "bg-stone-800"}`}
                 style={{ fontFamily: "Mitr, sans-serif" }}
               >
@@ -1232,7 +1307,9 @@ function AdminDashboard({ adminKey, onLogout }) {
               </ActionButton>
               <ActionButton
                 onClick={skipNight}
-                disabled={busyAction === "skip-night"}
+                disabled={
+                  busyAction === "skip-night" || !gameState.clockEnabled
+                }
                 className="w-full flex items-center justify-center gap-2 py-4 rounded-2xl font-semibold text-white bg-orange-500 disabled:opacity-60"
               >
                 {busyAction === "skip-night" ? (
@@ -1240,11 +1317,12 @@ function AdminDashboard({ adminKey, onLogout }) {
                 ) : (
                   <SkipForward size={18} />
                 )}{" "}
-                ข้ามคืน (+12 ชม.)
+                ข้ามคืน → 06:00 วันถัดไป
               </ActionButton>
               <p className="text-xs text-stone-400 mt-3">
-                💡 ค่าเช่า/ดอกเบี้ย/ค่าปรับเงินกู้คำนวณอัตโนมัติทุกวันผ่าน Apps
-                Script trigger (runDailyRollover)
+                💡 ค่าเช่า ดอกเบี้ย และรอบผ่อนคิดตามวันในเกมเมื่อขึ้นวันใหม่
+                ข้ามคืนจะปิดรอบการเงิน 1 วันตามกติกาเดิม ระบบตรวจรอบประมาณทุก 1
+                นาทีจริง
               </p>
             </div>
           )}
@@ -1985,6 +2063,7 @@ function Modal(props) {
 }
 function VisaCard({ user }) {
   const [printError, setPrintError] = useState("");
+  const [cardImage, setCardImage] = useState(null);
   const version = Math.max(1, number(user.qrVersion));
   const payload = JSON.stringify({
     action: "jiwpay_card",
@@ -1992,6 +2071,7 @@ function VisaCard({ user }) {
     cardType: user.hasCreditCard ? "visa" : "wallet",
     qrVersion: version,
   });
+  useEffect(() => setCardImage(null), [payload, user.name, user.qrEnabled]);
   return (
     <details className="jp-card overflow-hidden mt-4">
       <summary className="cursor-pointer p-4 flex items-center gap-2 text-sm font-semibold">
@@ -2037,14 +2117,36 @@ function VisaCard({ user }) {
             onClick={async () => {
               setPrintError("");
               try {
-                await printCardQr(user, payload, version);
+                setCardImage(await createCardImage(user, payload, version));
               } catch (error) {
                 setPrintError(error.message);
               }
             }}
           >
-            พิมพ์ QR ติดบัตร
+            เตรียมรูปบัตรแนวนอน
           </ActionButton>
+        )}
+        {cardImage && user.qrEnabled && (
+          <div className="mt-4 space-y-3">
+            <img
+              src={cardImage}
+              alt={`บัตรแนวนอนของ ${user.name}`}
+              className="w-full rounded-xl border border-orange-100"
+            />
+            <a
+              href={cardImage}
+              download={`JiwPay-${user.account}-v${version}-3x2in.png`}
+              className="jp-primary w-full"
+            >
+              บันทึกรูปบัตร
+            </a>
+            <p className="text-xs text-stone-500">
+              PNG 1500 × 1000 พิกเซล · แนวนอน 3 × 2 นิ้ว
+              <br />
+              บน iPhone ถ้าเปิดเป็นรูป ให้แตะรูปค้างแล้วเลือกบันทึกไปยังรูปภาพ
+              เมื่อนำไปจัดพิมพ์ กำหนดขนาดแต่ละใบเป็น 3 × 2 นิ้ว
+            </p>
+          </div>
         )}
         {printError && (
           <p role="alert" className="text-sm text-red-600 mt-2">
@@ -2081,54 +2183,134 @@ function CardQr({ payload }) {
 }
 
 // A separate print document keeps account management controls off the sticker.
-function printCardQr(user, payload, version) {
-  const popup = window.open("", "_blank", "width=600,height=700");
-  if (!popup)
-    return Promise.reject(
-      new Error("กรุณาอนุญาตป๊อปอัปเพื่อเปิดหน้าพิมพ์บัตร"),
-    );
-  popup.opener = null;
-  const doc = popup.document;
-  doc.title = "JiwPay · QR ติดบัตร";
-  const style = doc.createElement("style");
-  style.textContent = `*{box-sizing:border-box}body{margin:0;padding:24px;font:14px sans-serif;text-align:center;color:#111;background:#fff8f0}article{width:2in;height:3in;padding:.12in;margin:0 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.08in;background:white;border:1px solid #d9bba6;border-radius:.12in;break-inside:avoid;overflow:hidden}img{width:1.65in;height:1.65in;display:block;flex-shrink:0}h1{font-size:15px;margin:0}p{font-size:10px;line-height:1.4;margin:0;overflow-wrap:anywhere;max-width:100%}button{padding:12px;margin:16px}.print-help{font-size:12px;color:#715643;margin:16px auto;max-width:340px}@media print{@page{size:auto;margin:10mm}body{padding:0;background:white}button,.print-help{display:none}article{margin:0;width:2in;height:3in;print-color-adjust:exact;-webkit-print-color-adjust:exact}}`;
-  doc.head.append(style);
-  const card = doc.createElement("article");
-  const title = doc.createElement("h1");
-  title.textContent = user.hasCreditCard ? "JiwPay · VISA" : "JiwPay";
-  const img = doc.createElement("img");
-  img.alt = "QR สำหรับร้านค้าสแกนรับชำระ";
-  const label = doc.createElement("p");
-  label.textContent = `${user.name} · ${user.account} · v${version}`;
-  const hint = doc.createElement("p");
-  hint.textContent = "สแกนเพื่อรับชำระ • บัตรภายในเกม";
-  card.append(title, img, label, hint);
-  const button = doc.createElement("button");
-  button.textContent = "กำลังเตรียม QR…";
-  button.disabled = true;
-  button.onclick = () => popup.print();
-  const instructions = doc.createElement("p");
-  instructions.className = "print-help";
-  instructions.textContent =
-    "บัตรแนวตั้ง กว้าง 2 × สูง 3 นิ้ว (50.8 × 76.2 มม.) เลือกขนาดจริง / 100% และปิดหัวกระดาษ–ท้ายกระดาษก่อนพิมพ์ ตัดตามขอบบัตร";
-  doc.body.replaceChildren(card, instructions, button);
-  return new Promise((resolve, reject) => {
-    const fail = () => {
-      clearTimeout(timer);
-      button.textContent = "โหลด QR ไม่สำเร็จ กรุณาปิดแล้วลองใหม่";
-      reject(new Error("โหลด QR สำหรับพิมพ์ไม่สำเร็จ กรุณาลองใหม่"));
-    };
-    const timer = setTimeout(fail, 20000);
-    img.onerror = fail;
-    img.onload = () => {
-      clearTimeout(timer);
-      button.disabled = false;
-      button.textContent = "พิมพ์บัตร 2 × 3 นิ้ว (100%)";
-      resolve();
-    };
-    img.src = `https://api.qrserver.com/v1/create-qr-code/?size=800x800&margin=40&ecc=M&data=${encodeURIComponent(payload)}`;
-  });
+async function createCardImage(user, payload, version) {
+  const load = (src) =>
+    new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      const timer = setTimeout(
+        () => reject(new Error("โหลดรูปบัตรไม่สำเร็จ กรุณาลองใหม่")),
+        20000,
+      );
+      img.onload = () => {
+        clearTimeout(timer);
+        resolve(img);
+      };
+      img.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error("โหลดโลโก้หรือ QR ไม่สำเร็จ กรุณาลองใหม่"));
+      };
+      img.src = src;
+    });
+  await document.fonts.ready;
+  const [logo, qr] = await Promise.all([
+    load(new URL("./jiwpay-logo-transparent.png", document.baseURI).href),
+    load(
+      `https://api.qrserver.com/v1/create-qr-code/?size=600x600&margin=40&ecc=M&data=${encodeURIComponent(payload)}`,
+    ),
+  ]);
+  const canvas = document.createElement("canvas");
+  canvas.width = 1500;
+  canvas.height = 1000;
+  const c = canvas.getContext("2d");
+  if (!c) throw new Error("อุปกรณ์นี้ยังสร้างรูปบัตรไม่ได้");
+  const bg = c.createLinearGradient(0, 0, 1500, 1000);
+  bg.addColorStop(0, "#ffb46b");
+  bg.addColorStop(0.5, "#ff8248");
+  bg.addColorStop(1, "#f15a91");
+  c.fillStyle = bg;
+  c.fillRect(0, 0, 1500, 1000);
+  c.fillStyle = "rgba(255,255,255,.15)";
+  for (const [x, y, r] of [
+    [1420, -70, 580],
+    [-80, 980, 420],
+    [600, 1100, 420],
+  ]) {
+    c.beginPath();
+    c.arc(x, y, r, 0, Math.PI * 2);
+    c.fill();
+  }
+  c.strokeStyle = "rgba(255,255,255,.4)";
+  c.lineWidth = 3;
+  c.beginPath();
+  c.roundRect(28, 28, 1444, 944, 50);
+  c.stroke();
+  c.drawImage(logo, 55, 48, 185, 185);
+  c.fillStyle = "#66351e";
+  c.font = '600 64px "Mitr", sans-serif';
+  c.fillText("JiwPay", 255, 142);
+  c.font = '400 27px "Prompt", sans-serif';
+  c.fillText("จิ๋วเปย์ · กระเป๋าความสุข", 258, 191);
+  c.fillStyle = "#fff5dd";
+  c.font = "italic bold 65px sans-serif";
+  c.textAlign = "right";
+  c.fillText(user.hasCreditCard ? "VISA" : "JIWPAY", 1425, 140);
+  c.textAlign = "left";
+  // Decorative chip and contactless arcs, kept well away from the QR quiet zone.
+  const gold = c.createLinearGradient(95, 295, 260, 410);
+  gold.addColorStop(0, "#fff4ba");
+  gold.addColorStop(1, "#c69943");
+  c.fillStyle = gold;
+  c.beginPath();
+  c.roundRect(95, 295, 165, 115, 20);
+  c.fill();
+  c.strokeStyle = "#b98b3a";
+  c.lineWidth = 3;
+  c.stroke();
+  for (const y of [333, 372]) {
+    c.beginPath();
+    c.moveTo(95, y);
+    c.lineTo(260, y);
+    c.stroke();
+  }
+  for (const x of [150, 205]) {
+    c.beginPath();
+    c.moveTo(x, 295);
+    c.lineTo(x, 410);
+    c.stroke();
+  }
+  c.strokeStyle = "rgba(255,255,255,.85)";
+  c.lineWidth = 8;
+  for (const r of [28, 48, 68]) {
+    c.beginPath();
+    c.arc(304, 352, r, -0.85, 0.85);
+    c.stroke();
+  }
+  c.fillStyle = "#723a28";
+  c.font = '400 25px "Prompt", sans-serif';
+  c.fillText("เลขบัญชี / ACCOUNT", 95, 490);
+  c.fillStyle = "#fff";
+  c.font = '600 70px "Mitr", sans-serif';
+  c.fillText(fmtAccount(user.account), 95, 580);
+  c.fillStyle = "#723a28";
+  c.font = '400 25px "Prompt", sans-serif';
+  c.fillText("เจ้าของบัตร", 95, 675);
+  let size = 48;
+  c.fillStyle = "#fff";
+  c.font = `500 ${size}px "Prompt", sans-serif`;
+  while (c.measureText(String(user.name)).width > 650 && size > 20) {
+    size--;
+    c.font = `500 ${size}px "Prompt", sans-serif`;
+  }
+  c.fillText(String(user.name), 95, 747, 650);
+  c.fillStyle = "#fff";
+  c.beginPath();
+  c.roundRect(835, 275, 580, 580, 30);
+  c.fill();
+  c.imageSmoothingEnabled = false;
+  c.drawImage(qr, 855, 295, 540, 540);
+  c.imageSmoothingEnabled = true;
+  c.fillStyle = "#713927";
+  c.font = '400 25px "Prompt", sans-serif';
+  c.textAlign = "center";
+  c.fillText("สแกนบัตรเพื่อรับชำระ", 1125, 901);
+  c.textAlign = "left";
+  c.fillStyle = "#723a28";
+  c.font = '400 24px "Prompt", sans-serif';
+  c.fillText(`บัตรภายในเกม · รุ่น ${version}`, 95, 907);
+  return canvas.toDataURL("image/png");
 }
+export { createCardImage };
 
 function LogoMark({
   className = "inline-block w-8 h-8 object-contain align-middle shrink-0",
@@ -2141,4 +2323,105 @@ function LogoMark({
       className={className}
     />
   );
+}
+
+function nightShare(state) {
+  const value = Number(state.nightPercent);
+  return [20, 25, 30, 50].includes(value) ? value / 100 : 0.5;
+}
+function clockPhase(total, state) {
+  const day = Math.floor(total / 1440),
+    m = total - day * 1440,
+    n = nightShare(state);
+  return (
+    day +
+    (m < 360
+      ? ((m / 360) * n) / 2
+      : m < 1080
+        ? n / 2 + ((m - 360) / 720) * (1 - n)
+        : 1 - n / 2 + (((m - 1080) / 360) * n) / 2)
+  );
+}
+function phaseMinutes(phase, state) {
+  const day = Math.floor(phase),
+    f = phase - day,
+    n = nightShare(state);
+  const minutes =
+    day * 1440 +
+    (f < n / 2
+      ? (f / (n / 2)) * 360
+      : f < 1 - n / 2
+        ? 360 + ((f - n / 2) / (1 - n)) * 720
+        : 1080 + ((f - (1 - n / 2)) / (n / 2)) * 360);
+  return Math.round(minutes * 1e8) / 1e8;
+}
+
+function GameClock({ state, large = false }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  if (!state) return <span>กำลังซิงค์เวลา...</span>;
+  const enabled =
+    state.clockEnabled === true || String(state.clockEnabled) === "true";
+  const paused =
+    state.gamePaused === true || String(state.gamePaused) === "true";
+  const speed = number(state.realMinutesPerDay) || 30;
+  const serverNow =
+    number(state.serverNowMs) +
+    Math.max(0, now - number(state.clockReceivedAt || now));
+  const anchored = enabled && number(state.anchorRealMs) > 0;
+  let total = anchored
+    ? phaseMinutes(
+        clockPhase(number(state.anchorGameMinutes), state) +
+          (paused
+            ? 0
+            : Math.max(0, serverNow - number(state.anchorRealMs)) /
+              (speed * 60000)),
+        state,
+      )
+    : (state.day - 1) * 1440 + state.hour * 60 + state.minute;
+  if (state.syncPending)
+    total = (state.day - 1) * 1440 + state.hour * 60 + state.minute;
+  const day = Math.floor(total / 1440) + 1,
+    minute = Math.floor(total % 1440);
+  const secondsLeft = Math.ceil(
+    (Math.floor(total / 1440) + 1 - clockPhase(total, state)) * speed * 60,
+  );
+  const time = `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+  return (
+    <span className={large ? "block" : "inline-block"}>
+      <span className={large ? "block text-3xl font-bold text-stone-800" : ""}>
+        {large ? `${time} น.` : `วันที่ ${day} · ${time} น.`}
+      </span>
+      {large && (
+        <span className="block text-sm font-semibold text-orange-600 mt-1">
+          วันที่ {day}
+        </span>
+      )}
+      <span
+        className={
+          large ? "block text-xs text-stone-500 mt-3" : "block text-[10px] mt-1"
+        }
+      >
+        {state.syncPending
+          ? "กำลังปิดบัญชีวันในเกม..."
+          : !enabled
+            ? "รอผู้ดูแลเริ่มนาฬิกาเกม"
+            : paused
+              ? "หยุดเวลาเกมชั่วคราว"
+              : `ขึ้นวันใหม่ใน ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, "0")} นาทีจริง · ${speed} นาที = 1 วัน`}
+      </span>
+    </span>
+  );
+}
+
+export { GameClock };
+
+export { clockPhase, phaseMinutes };
+
+function formatDuration(seconds) {
+  const n = Math.round(seconds);
+  return `${Math.floor(n / 60)} นาที ${n % 60} วินาทีจริง`;
 }
